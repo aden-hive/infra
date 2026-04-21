@@ -81,24 +81,46 @@ chmod -R 755 $envd_dir
 ls -lh $envd_dir
 du -h "${envd_dir}/envd"
 
+# Fetch a subdirectory of public build artifacts into $dest_dir.
+#
+# Source selection:
+#   * If FC_PUBLIC_BUILDS_S3_BUCKET is set, use `aws s3 cp --recursive` (supports
+#     any S3-compatible backend; pass FC_PUBLIC_BUILDS_S3_ENDPOINT for OVH
+#     Object Storage, Ceph RGW, MinIO, etc.). Requires aws-cli on the host.
+#   * Otherwise, fall back to the E2B upstream GCS bucket via gsutil.
+fetch_public_builds() {
+    local subpath="$1"
+    local dest_dir="$2"
+    if [ -n "${FC_PUBLIC_BUILDS_S3_BUCKET:-}" ]; then
+        local endpoint_arg=""
+        if [ -n "${FC_PUBLIC_BUILDS_S3_ENDPOINT:-}" ]; then
+            endpoint_arg="--endpoint-url=${FC_PUBLIC_BUILDS_S3_ENDPOINT}"
+        fi
+        aws s3 cp --recursive ${endpoint_arg} \
+            "s3://${FC_PUBLIC_BUILDS_S3_BUCKET}/${subpath}/" "${dest_dir}/"
+    else
+        gsutil -m cp -r "gs://e2b-prod-public-builds/${subpath}/*" "${dest_dir}"
+    fi
+}
+
 # Download kernels
 kernels_dir="/fc-kernels"
 mkdir -p $kernels_dir
-gsutil -m cp -r gs://e2b-prod-public-builds/kernels/* "${kernels_dir}"
+fetch_public_builds kernels "$kernels_dir"
 chmod -R 755 $kernels_dir
 ls -lh $kernels_dir
 
 # Download FC versions
 fc_versions_dir="/fc-versions"
 mkdir -p $fc_versions_dir
-gsutil -m cp -r gs://e2b-prod-public-builds/firecrackers/* "${fc_versions_dir}"
+fetch_public_builds firecrackers "$fc_versions_dir"
 chmod -R 755 $fc_versions_dir
 ls -lh $fc_versions_dir
 
 # Download busybox
 busybox_dir="/fc-busybox"
 mkdir -p $busybox_dir
-gsutil -m cp -r gs://e2b-prod-public-builds/busybox/* "${busybox_dir}"
+fetch_public_builds busybox "$busybox_dir"
 chmod -R 755 $busybox_dir
 ls -lh $busybox_dir
 
