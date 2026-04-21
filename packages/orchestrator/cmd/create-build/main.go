@@ -432,6 +432,17 @@ func printLocalFileSizes(basePath, buildID string) {
 	}
 }
 
+// publicBuildsBaseURL returns the base URL that hosts Firecracker kernel and
+// binary artifacts. FC_PUBLIC_BUILDS_URL lets operators mirror to an
+// S3-compatible or HTTP endpoint (e.g. OVH Object Storage) instead of
+// reaching out to E2B's upstream GCS bucket on every build host.
+func publicBuildsBaseURL() string {
+	if u := os.Getenv("FC_PUBLIC_BUILDS_URL"); u != "" {
+		return strings.TrimRight(u, "/")
+	}
+	return "https://storage.googleapis.com/e2b-prod-public-builds"
+}
+
 func setupKernel(ctx context.Context, dir, version string) error {
 	arch := utils.TargetArch()
 	dstPath := filepath.Join(dir, version, arch, "vmlinux.bin")
@@ -447,7 +458,7 @@ func setupKernel(ctx context.Context, dir, version string) error {
 	}
 
 	// Try arch-specific URL first: {version}/{arch}/vmlinux.bin
-	archURL, err := url.JoinPath("https://storage.googleapis.com/e2b-prod-public-builds/kernels/", version, arch, "vmlinux.bin")
+	archURL, err := url.JoinPath(publicBuildsBaseURL(), "kernels", version, arch, "vmlinux.bin")
 	if err != nil {
 		return fmt.Errorf("invalid kernel URL: %w", err)
 	}
@@ -465,7 +476,7 @@ func setupKernel(ctx context.Context, dir, version string) error {
 		return fmt.Errorf("kernel %s not found for %s (no legacy fallback for non-amd64)", version, arch)
 	}
 
-	legacyURL, err := url.JoinPath("https://storage.googleapis.com/e2b-prod-public-builds/kernels/", version, "vmlinux.bin")
+	legacyURL, err := url.JoinPath(publicBuildsBaseURL(), "kernels", version, "vmlinux.bin")
 	if err != nil {
 		return fmt.Errorf("invalid kernel legacy URL: %w", err)
 	}
@@ -489,8 +500,8 @@ func setupFC(ctx context.Context, dir, version string) error {
 		return nil
 	}
 
-	// Download from GCS bucket with {version}/{arch}/firecracker path
-	fcURL, err := url.JoinPath("https://storage.googleapis.com/e2b-prod-public-builds/firecrackers/", version, arch, "firecracker")
+	// Download from the public builds endpoint with {version}/{arch}/firecracker path
+	fcURL, err := url.JoinPath(publicBuildsBaseURL(), "firecrackers", version, arch, "firecracker")
 	if err != nil {
 		return fmt.Errorf("invalid Firecracker URL: %w", err)
 	}
@@ -508,7 +519,7 @@ func setupFC(ctx context.Context, dir, version string) error {
 		return fmt.Errorf("firecracker %s not found for %s (no legacy fallback for non-amd64)", version, arch)
 	}
 
-	legacyURL, err := url.JoinPath("https://storage.googleapis.com/e2b-prod-public-builds/firecrackers/", version, "firecracker")
+	legacyURL, err := url.JoinPath(publicBuildsBaseURL(), "firecrackers", version, "firecracker")
 	if err != nil {
 		return fmt.Errorf("invalid Firecracker legacy URL: %w", err)
 	}
