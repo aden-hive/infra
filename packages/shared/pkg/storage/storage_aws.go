@@ -51,7 +51,24 @@ func newAWSStorage(ctx context.Context, bucketName string) (*awsStorage, error) 
 		return nil, err
 	}
 
-	client := s3.NewFromConfig(cfg)
+	// Allow pointing at S3-compatible backends (OVH Object Storage,
+	// Ceph RGW, MinIO, etc.) without a new provider implementation.
+	// AWS_ENDPOINT_URL_S3 → client BaseEndpoint; AWS_S3_USE_PATH_STYLE=true
+	// opts into path-style addressing for backends that don't wildcard
+	// bucket subdomains.
+	var s3Opts []func(*s3.Options)
+	if ep := os.Getenv("AWS_ENDPOINT_URL_S3"); ep != "" {
+		s3Opts = append(s3Opts, func(o *s3.Options) {
+			o.BaseEndpoint = aws.String(ep)
+		})
+	}
+	if strings.EqualFold(os.Getenv("AWS_S3_USE_PATH_STYLE"), "true") {
+		s3Opts = append(s3Opts, func(o *s3.Options) {
+			o.UsePathStyle = true
+		})
+	}
+
+	client := s3.NewFromConfig(cfg, s3Opts...)
 	presignClient := s3.NewPresignClient(client)
 
 	return &awsStorage{
