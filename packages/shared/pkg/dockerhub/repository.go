@@ -35,6 +35,13 @@ type RemoteRepository interface {
 func GetRemoteRepository(ctx context.Context) (RemoteRepository, error) {
 	provider := RemoteRepositoryProvider(env.GetEnv(storageProviderEnv, string(DefaultRegistryProvider)))
 
+	// Local: resolve default-registry image references against the host's
+	// Docker daemon. No remote URL needed — images are expected to be
+	// preloaded via `docker load` on the operator host.
+	if provider == LocalStorageProvider {
+		return NewDaemonRemoteRepository(), nil
+	}
+
 	dockerRemoteRepositoryURL := env.GetEnv(storageRemoteRepositoryURL, "")
 	if dockerRemoteRepositoryURL == "" {
 		return NewNoopRemoteRepository(), nil
@@ -48,8 +55,6 @@ func GetRemoteRepository(ctx context.Context) (RemoteRepository, error) {
 		return NewAWSRemoteRepository(setupCtx, dockerRemoteRepositoryURL)
 	case GCPStorageProvider:
 		return NewGCPRemoteRepository(setupCtx, dockerRemoteRepositoryURL)
-	case LocalStorageProvider:
-		return NewNoopRemoteRepository(), nil
 	}
 
 	return nil, fmt.Errorf("unknown dockerhub remote repository provider: %s", provider)
