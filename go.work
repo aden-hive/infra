@@ -17,4 +17,5 @@ use (
 	./tests/integration
 	./tools/s3-smoke
 	./tools/sandbox-ctl
+	./tools/gen-api-key
 )
