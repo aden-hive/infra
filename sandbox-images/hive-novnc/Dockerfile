@@ -33,6 +33,17 @@ COPY pack-and-policy.sh /usr/local/bin/pack-and-policy.sh
 RUN chmod +x /usr/local/bin/pack-and-policy.sh && /usr/local/bin/pack-and-policy.sh
 
 COPY supervisord.conf /etc/supervisor/conf.d/sandbox.conf
+
+# Make the base supervisor install E2B-template-builder friendly.
+# envd runs the sandbox start-cmd as a constrained user that can't write to
+# /var/log, /var/run, or even /dev/stdout; moving everything into /tmp and
+# dropping user= directives lets supervisord start as whoever envd invokes it as.
+RUN sed -i \
+      -e 's|/var/run/supervisor.sock|/tmp/supervisor.sock|g' \
+      -e 's|/var/run/supervisord.pid|/tmp/supervisord.pid|' \
+      -e 's|logfile=/var/log/supervisor/supervisord.log.*|logfile=NONE|' \
+      -e 's|childlogdir=/var/log/supervisor.*|childlogdir=/tmp|' \
+      /etc/supervisor/supervisord.conf
 COPY start-chrome.sh /usr/local/bin/start-chrome.sh
 RUN chmod +x /usr/local/bin/start-chrome.sh
 
