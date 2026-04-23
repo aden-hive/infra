@@ -9,6 +9,7 @@ go.work.sum
 .infisical.json
 .last_used_env
 .local-baremetal-sim/
+.ovh-secrets/
 /packages/fc-kernels
 /packages/fc-versions
 .terraform

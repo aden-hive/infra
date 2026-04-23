@@ -15,9 +15,10 @@ import (
 type RemoteRepositoryProvider string
 
 const (
-	GCPStorageProvider   RemoteRepositoryProvider = "GCP_REMOTE_REPOSITORY"
-	AWSStorageProvider   RemoteRepositoryProvider = "AWS_ECR"
-	LocalStorageProvider RemoteRepositoryProvider = "Local"
+	GCPStorageProvider      RemoteRepositoryProvider = "GCP_REMOTE_REPOSITORY"
+	AWSStorageProvider      RemoteRepositoryProvider = "AWS_ECR"
+	LocalStorageProvider    RemoteRepositoryProvider = "Local"
+	RegistryStorageProvider RemoteRepositoryProvider = "Registry"
 
 	DefaultRegistryProvider RemoteRepositoryProvider = GCPStorageProvider
 
@@ -55,6 +56,8 @@ func GetRemoteRepository(ctx context.Context) (RemoteRepository, error) {
 		return NewAWSRemoteRepository(setupCtx, dockerRemoteRepositoryURL)
 	case GCPStorageProvider:
 		return NewGCPRemoteRepository(setupCtx, dockerRemoteRepositoryURL)
+	case RegistryStorageProvider:
+		return NewRegistryRemoteRepository(dockerRemoteRepositoryURL), nil
 	}
 
 	return nil, fmt.Errorf("unknown dockerhub remote repository provider: %s", provider)

@@ -14,9 +14,10 @@ import (
 type RegistryProvider string
 
 const (
-	GCPStorageProvider   RegistryProvider = "GCP_ARTIFACTS"
-	AWSStorageProvider   RegistryProvider = "AWS_ECR"
-	LocalStorageProvider RegistryProvider = "Local"
+	GCPStorageProvider      RegistryProvider = "GCP_ARTIFACTS"
+	AWSStorageProvider      RegistryProvider = "AWS_ECR"
+	LocalStorageProvider    RegistryProvider = "Local"
+	RegistryStorageProvider RegistryProvider = "Registry"
 
 	DefaultRegistryProvider RegistryProvider = GCPStorageProvider
 
@@ -44,6 +45,8 @@ func GetArtifactsRegistryProvider(ctx context.Context) (ArtifactsRegistry, error
 		return NewGCPArtifactsRegistry(setupCtx)
 	case LocalStorageProvider:
 		return NewLocalArtifactsRegistry()
+	case RegistryStorageProvider:
+		return NewRegistryArtifactsRegistry()
 	}
 
 	return nil, fmt.Errorf("unknown artifacts registry provider: %s", provider)

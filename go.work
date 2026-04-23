@@ -15,4 +15,6 @@ use (
 	./packages/shared
 
 	./tests/integration
+	./tools/s3-smoke
+	./tools/sandbox-ctl
 )

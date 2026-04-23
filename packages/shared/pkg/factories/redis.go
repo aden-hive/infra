@@ -113,14 +113,23 @@ func NewRedisClient(ctx context.Context, config RedisConfig) (redis.UniversalCli
 
 		redisClient = redis.NewClusterClient(clusterOpts)
 	case config.RedisURL != "":
-		opts := &redis.Options{
-			Addr:                  config.RedisURL,
-			PoolSize:              poolSize,
-			MinIdleConns:          minIdleConns,
-			ConnMaxIdleTime:       -1,
-			ConnMaxLifetime:       connMaxLifetime,
-			ConnMaxLifetimeJitter: connMaxLifetimeJitter,
+		var opts *redis.Options
+		// Accept both bare host:port (legacy) and redis://user:pass@host:port URLs
+		// (so distributed deployments with auth work without new env vars).
+		if strings.HasPrefix(config.RedisURL, "redis://") || strings.HasPrefix(config.RedisURL, "rediss://") {
+			parsed, err := redis.ParseURL(config.RedisURL)
+			if err != nil {
+				return nil, fmt.Errorf("invalid REDIS_URL: %w", err)
+			}
+			opts = parsed
+		} else {
+			opts = &redis.Options{Addr: config.RedisURL}
 		}
+		opts.PoolSize = poolSize
+		opts.MinIdleConns = minIdleConns
+		opts.ConnMaxIdleTime = -1
+		opts.ConnMaxLifetime = connMaxLifetime
+		opts.ConnMaxLifetimeJitter = connMaxLifetimeJitter
 
 		redisClient = redis.NewClient(opts)
 	default:
