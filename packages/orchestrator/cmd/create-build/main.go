@@ -68,6 +68,7 @@ func main() {
 	readyCmd := flag.String("ready-cmd", "", "ready check command")
 	timeout := flag.Int("timeout", 5, "build timeout in minutes")
 	verbose := flag.Bool("v", false, "verbose output")
+	fromImage := flag.String("fromImage", baseImage, "base OCI image to build from (default: e2bdev/base:latest)")
 	flag.Parse()
 
 	if *toBuild == "" {
@@ -100,7 +101,7 @@ func main() {
 		log.Fatalf("network config: %v", err)
 	}
 
-	err = doBuild(ctx, *templateID, *toBuild, *fromBuild, *kernel, *fc, *vcpu, *memory, *disk, *hugePages, *startCmd, *setupCmd, *readyCmd, localMode, *verbose, *timeout, builderConfig, networkConfig)
+	err = doBuild(ctx, *templateID, *toBuild, *fromBuild, *fromImage, *kernel, *fc, *vcpu, *memory, *disk, *hugePages, *startCmd, *setupCmd, *readyCmd, localMode, *verbose, *timeout, builderConfig, networkConfig)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -199,7 +200,7 @@ func setupEnv(ctx context.Context, storagePath, sandboxDir, kernel, fc string, l
 
 func doBuild(
 	parentCtx context.Context,
-	templateID, buildID, fromBuild, kernel, fc string,
+	templateID, buildID, fromBuild, fromImage, kernel, fc string,
 	vcpu, memory, disk int,
 	hugePages bool,
 	startCmd, setupCmd, readyCmd string,
@@ -366,7 +367,8 @@ func doBuild(
 		tmpl.FromTemplate = &templatemanager.FromTemplateConfig{BuildID: fromBuild}
 		fmt.Printf("Building from: %s\n", fromBuild)
 	} else {
-		tmpl.FromImage = baseImage
+		tmpl.FromImage = fromImage
+		fmt.Printf("Building from image: %s\n", fromImage)
 	}
 
 	result, err := builder.Build(ctx, storage.Paths{BuildID: buildID}, tmpl, l.Detach(ctx).Core())
