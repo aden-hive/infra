@@ -1,0 +1,543 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Hive SaaS — existing aden-hive + what's missing to add sandbox orchestration</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --surface: #171a21;
+    --surface-2: #1e2230;
+    --fg: #d6d9e0;
+    --fg-dim: #8b909c;
+    --line: #2a2f3c;
+    --green: #3fb950;
+    --green-bg: #132b18;
+    --yellow: #d29922;
+    --yellow-bg: #2b230e;
+    --red: #f85149;
+    --red-bg: #2b1316;
+    --accent: #58a6ff;
+  }
+  html, body { background: var(--bg); color: var(--fg); margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.45; }
+  .page { max-width: 1280px; margin: 0 auto; padding: 32px 24px 64px; }
+  h1 { font-size: 22px; margin: 0 0 4px; font-weight: 600; }
+  h2 { font-size: 15px; margin: 24px 0 8px; font-weight: 600; color: var(--fg); }
+  p.sub { color: var(--fg-dim); margin: 0 0 24px; }
+  .legend { display: flex; gap: 12px; margin: 12px 0 24px; flex-wrap: wrap; font-size: 12px; }
+  .legend-item { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); }
+  .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+  .sw.green { background: var(--green); }
+  .sw.yellow { background: var(--yellow); }
+  .sw.red { background: var(--red); }
+
+  .layer {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px 16px 16px;
+    margin-bottom: 14px;
+  }
+  .layer.existing { border-color: #1e4b28; }
+  .layer.new { border-color: #3a1e22; }
+  .layer-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+  .layer-head .name { font-weight: 600; font-size: 14px; letter-spacing: 0.02em; }
+  .layer-head .hint { color: var(--fg-dim); font-size: 12px; }
+  .layer-head .origin { font-size: 11px; padding: 1px 8px; border-radius: 999px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .origin.existing { background: #132b18; color: var(--green); border: 1px solid var(--green); }
+  .origin.new { background: #2b1316; color: var(--red); border: 1px solid var(--red); }
+  .boxes { display: flex; flex-wrap: wrap; gap: 10px; }
+  .box {
+    flex: 1 1 200px;
+    min-width: 180px;
+    padding: 10px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--line);
+    background: var(--surface-2);
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .box .title { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 13px; }
+  .box .note { font-size: 11.5px; color: var(--fg-dim); }
+  .box.green { border-color: var(--green); background: var(--green-bg); }
+  .box.yellow { border-color: var(--yellow); background: var(--yellow-bg); }
+  .box.red { border-color: var(--red); background: var(--red-bg); }
+  .box.green .title::before { content: "✓"; color: var(--green); }
+  .box.yellow .title::before { content: "◐"; color: var(--yellow); }
+  .box.red .title::before { content: "✗"; color: var(--red); }
+
+  .flow { text-align: center; color: var(--fg-dim); font-size: 14px; padding: 2px 0 6px; }
+  .pill {
+    display: inline-block; font-size: 10.5px; padding: 1px 6px; border-radius: 4px;
+    background: #222836; color: var(--fg-dim); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    margin-right: 4px;
+  }
+
+  table.gaps { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12.5px; }
+  table.gaps th, table.gaps td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  table.gaps th { color: var(--fg-dim); font-weight: 600; background: var(--surface); }
+  table.gaps td.tag { white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--fg-dim); font-size: 11.5px; }
+  .status-green { color: var(--green); font-weight: 600; }
+  .status-yellow { color: var(--yellow); font-weight: 600; }
+  .status-red { color: var(--red); font-weight: 600; }
+
+  footer { margin-top: 28px; color: var(--fg-dim); font-size: 12px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="page">
+
+<h1>Hive SaaS — control plane + cloud/desktop data planes, Hive runtime shared</h1>
+<p class="sub">
+Three pieces layered together: (1) the existing <code>aden-hive</code> SaaS control plane on GKE — auth, users, teams, API keys, billing, tsdb. (2) a <strong>deployment-mode switch</strong> that routes each session to either the <span style="color:var(--red)">cloud</span> data plane (Firecracker microVMs on OVH) or the <span style="color:var(--red)">desktop</span> data plane (Electron app on the user's machine). (3) the <strong>Hive runtime</strong> — the agent harness itself (framework + tools + commercial + extension) — which runs <em>inside both</em> data planes. Source code spine, three packaging variants.
+</p>
+
+<div class="legend">
+  <span class="legend-item"><span class="sw green"></span> Already deployed</span>
+  <span class="legend-item"><span class="sw yellow"></span> Partial / single-tenant</span>
+  <span class="legend-item"><span class="sw red"></span> Missing (new work)</span>
+</div>
+
+<!-- USERS -->
+<div class="layer">
+  <div class="layer-head">
+    <div class="name">0 · Clients</div>
+    <div class="hint">who talks to the product — two runtime modes</div>
+  </div>
+  <div class="boxes">
+    <div class="box green">
+      <div class="title">End users (web dashboard)</div>
+      <div class="note">aden-hive serves an authenticated dashboard (Vercel edge). Adds sandbox + mode-switch UI.</div>
+    </div>
+    <div class="box green">
+      <div class="title">API / SDK consumers</div>
+      <div class="note">JWT or <span class="pill">Authorization: Bearer &lt;api-key&gt;</span> flows exist in <span class="pill">api-key.controller.ts</span>.</div>
+    </div>
+    <div class="box red">
+      <div class="title">Desktop app (Electron / native)</div>
+      <div class="note">Packages local Hive runtime + Chrome extension. Pairs to aden-hive via device-code OAuth; heartbeats usage + receives entitlement.</div>
+    </div>
+    <div class="box yellow">
+      <div class="title">Admin console</div>
+      <div class="note">aden-hive has admin routes for honeycomb / oauth; needs sandbox + desktop-fleet views.</div>
+    </div>
+  </div>
+</div>
+
+<div class="flow">↕</div>
+
+<!-- EDGE -->
+<div class="layer existing">
+  <div class="layer-head">
+    <div class="name">1 · Edge / Ingress</div>
+    <div class="hint">public surface, TLS, routing</div>
+    <div class="origin existing">mostly aden-hive</div>
+  </div>
+  <div class="boxes">
+    <div class="box green">
+      <div class="title">Vercel edge + GCP LB</div>
+      <div class="note">TLS, WAF, path-based routing to GKE ingress; documented in CASA SAQ.</div>
+    </div>
+    <div class="box green">
+      <div class="title">GCP LB → GKE Ingress</div>
+      <div class="note">Terminates at Express.js in the aden-hive pod with Passport middleware.</div>
+    </div>
+    <div class="box red">
+      <div class="title">Sandbox subdomain router</div>
+      <div class="note">New: route <span class="pill">&lt;id&gt;.sandbox.hive.com</span> into the OVH fleet. Not on GKE path.</div>
+    </div>
+    <div class="box red">
+      <div class="title">WebSocket edge for noVNC</div>
+      <div class="note">Long-lived WS + session affinity for 45-min+ noVNC sessions; can't use GCP LB easily.</div>
+    </div>
+    <div class="box yellow">
+      <div class="title">Firewall (PoC GCE)</div>
+      <div class="note">3 dev IPs × tcp:6080+8787 → single GCE VM. Demo-only.</div>
+    </div>
+  </div>
+</div>
+
+<div class="flow">↕</div>
+
+<!-- EXISTING CONTROL PLANE -->
+<div class="layer existing">
+  <div class="layer-head">
+    <div class="name">2 · Control plane — existing (aden-hive on GKE)</div>
+    <div class="hint">TypeScript / Express; everything SaaS-standard is already here</div>
+    <div class="origin existing">aden-hive</div>
+  </div>
+  <div class="boxes">
+    <div class="box green">
+      <div class="title">Auth service</div>
+      <div class="note">Passport JWT (<span class="pill">app.ts:79-84</span>), API-key middleware, OAuth state w/ CSRF + 10-min TTL.</div>
+    </div>
+    <div class="box green">
+      <div class="title">User / team mgmt</div>
+      <div class="note"><span class="pill">user.controller.ts</span>: bcrypt (10 rounds), team_id on JWT, team-scoped queries everywhere.</div>
+    </div>
+    <div class="box green">
+      <div class="title">API key lifecycle</div>
+      <div class="note">AES-256-GCM at rest (<span class="pill">api-key.service.ts:108</span>); scope-based <span class="pill">hasScope()</span>.</div>
+    </div>
+    <div class="box green">
+      <div class="title">OAuth integrations</div>
+      <div class="note">Gmail + honeycomb session OAuth; tokens AES-256-GCM (<span class="pill">oauth.service.ts:218-220</span>).</div>
+    </div>
+    <div class="box green">
+      <div class="title">Honeycomb sessions</div>
+      <div class="note">Existing session resource abstraction. Probable extension point for sandbox sessions.</div>
+    </div>
+    <div class="box green">
+      <div class="title">tsdb service</div>
+      <div class="note">Time-series data per team; team schema creation. Natural home for sandbox-hour metering.</div>
+    </div>
+    <div class="box green">
+      <div class="title">Notifications</div>
+      <div class="note"><span class="pill">notification.controller.ts</span>: ship sandbox lifecycle events to end users.</div>
+    </div>
+    <div class="box red">
+      <div class="title">Sandbox controller + service</div>
+      <div class="note">New: <span class="pill">sandbox.controller.ts</span>, <span class="pill">sandbox.service.ts</span>. CRUD + lifecycle. Delegates to whichever data plane the mode switch picks.</div>
+    </div>
+    <div class="box red">
+      <div class="title">Deployment-mode switch</div>
+      <div class="note">Per-user / team / plan preference: <span class="pill">cloud</span> · <span class="pill">desktop</span> · <span class="pill">auto</span>. Stored on team row; overridable per-session.</div>
+    </div>
+    <div class="box red">
+      <div class="title">Desktop client registry + pairing</div>
+      <div class="note">Device-code OAuth pairs a desktop install to a user. Tracks machine_id, app version, last heartbeat, status.</div>
+    </div>
+    <div class="box red">
+      <div class="title">Entitlement API</div>
+      <div class="note">Desktop client polls for: allowed models, LLM quota left, feature flags, remote-kill flag. Short-lived JWT (~1h).</div>
+    </div>
+    <div class="box red">
+      <div class="title">Unified usage ingest</div>
+      <div class="note">One ingestion endpoint fed by both the OVH orchestrator AND desktop heartbeats. Writes to tsdb for billing.</div>
+    </div>
+  </div>
+</div>
+
+<div class="flow">↕</div>
+
+<!-- EXISTING STATEFUL -->
+<div class="layer existing">
+  <div class="layer-head">
+    <div class="name">3 · Control plane — stateful (aden-hive)</div>
+    <div class="hint">everything already wired; no new data store needed for users/auth/billing</div>
+    <div class="origin existing">aden-hive</div>
+  </div>
+  <div class="boxes">
+    <div class="box green">
+      <div class="title">PostgreSQL</div>
+      <div class="note">Users, teams, API keys, OAuth state, notifications. Add sandbox table.</div>
+    </div>
+    <div class="box green">
+      <div class="title">TimescaleDB</div>
+      <div class="note">Per-team schemas. Natural store for sandbox usage / agent events.</div>
+    </div>
+    <div class="box green">
+      <div class="title">MongoDB</div>
+      <div class="note">Existing document store (honeycomb artefacts).</div>
+    </div>
+    <div class="box green">
+      <div class="title">Redis</div>
+      <div class="note">Session cache, OAuth state token TTL, pubsub.</div>
+    </div>
+    <div class="box green">
+      <div class="title">K8s Secrets (GKE)</div>
+      <div class="note">DB creds, JWT salt, AES keys. Non-root pods, read-only FS.</div>
+    </div>
+    <div class="box yellow">
+      <div class="title">Billing / metering</div>
+      <div class="note">Not visible in controllers/ — may live in jobs/ or be Stripe-webhook-driven. Verify before sizing work.</div>
+    </div>
+  </div>
+</div>
+
+<div class="flow">↕ mode switch routes the session ↕</div>
+
+<!-- DATA PLANE A — CLOUD -->
+<div class="layer new">
+  <div class="layer-head">
+    <div class="name">4A · Cloud data plane — OVH Firecracker fleet</div>
+    <div class="hint">for sessions routed to <span class="pill">cloud</span></div>
+    <div class="origin new">net-new on OVH</div>
+  </div>
+  <div class="boxes">
+    <div class="box red">
+      <div class="title">Sandbox orchestrator service</div>
+      <div class="note">New Go service (E2B-derived) on OVH. Verifies JWT/API-key with aden-hive, schedules FC VMs, signs sandbox URLs.</div>
+    </div>
+    <div class="box red">
+      <div class="title">Nomad + Consul</div>
+      <div class="note">Schedules FC microVMs on bare-metal; service discovery for the fleet.</div>
+    </div>
+    <div class="box yellow">
+      <div class="title">Hive sandbox image</div>
+      <div class="note">Built and pushed (<span class="pill">hive-novnc:dev</span>). Single-tenant today; multi-tenant once orchestrator spawns per-session.</div>
+    </div>
+    <div class="box yellow">
+      <div class="title">Per-sandbox Chrome + noVNC</div>
+      <div class="note">Works in one container on GCE. Needs orchestrator-driven provisioning per session, not a shared pool.</div>
+    </div>
+    <div class="box red">
+      <div class="title">Hibernate / resume</div>
+      <div class="note">Idle → FC snapshot → Object Storage; wake on next request. Core cost-control lever.</div>
+    </div>
+    <div class="box red">
+      <div class="title">Beeline bridge auto-wire</div>
+      <div class="note">Extension is force-installed via Chrome policy; bridge starts lazily. Needs supervised always-on.</div>
+    </div>
+    <div class="box red">
+      <div class="title">Per-user workspace</div>
+      <div class="note"><span class="pill">~/.hive/{agents,colonies,memories}</span> on Object Storage; overlay-mounted per session.</div>
+    </div>
+  </div>
+</div>
+
+<!-- DATA PLANE B — DESKTOP -->
+<div class="layer new">
+  <div class="layer-head">
+    <div class="name">4B · Desktop data plane — user's own machine</div>
+    <div class="hint">for sessions routed to <span class="pill">desktop</span> — no OVH involvement</div>
+    <div class="origin new">net-new desktop app · hosts Hive runtime locally</div>
+  </div>
+  <div class="boxes">
+    <div class="box yellow">
+      <div class="title">Electron shell (<span class="pill">hive-desktop</span>)</div>
+      <div class="note">Scaffolded: main / preload / renderer split (<span class="pill">src/main/runtime.ts</span> supervises subprocess, <span class="pill">sse.ts</span> + <span class="pill">ipc.ts</span> bridge UI ↔ runtime). No packaging, signing, or aden-hive auth yet.</div>
+    </div>
+    <div class="box yellow">
+      <div class="title">Bundled runtime (<span class="pill">hive-desktop-runtime</span>)</div>
+      <div class="note">uv workspace with <strong>core + tools + commercial</strong>. Electron spawns it as a subprocess; same Python agent harness, plus paid-only modules.</div>
+    </div>
+    <div class="box red">
+      <div class="title">Paired identity</div>
+      <div class="note">Device-code OAuth against aden-hive at first launch; refresh token in OS keychain; short-lived JWT refreshed via entitlement poll.</div>
+    </div>
+    <div class="box yellow">
+      <div class="title">User's own Chrome + extension</div>
+      <div class="note">Existing Beeline-style model: user installs Hive Browser Bridge from Chrome Web Store; agent drives user's tabs. Desktop app prompts + deep-links the install.</div>
+    </div>
+    <div class="box red">
+      <div class="title">Usage heartbeat</div>
+      <div class="note">Batched POST to aden-hive every N seconds with LLM tokens, active-agent-seconds, tool counts. Offline-buffered to disk.</div>
+    </div>
+    <div class="box red">
+      <div class="title">Remote kill / feature flags</div>
+      <div class="note">Entitlement response carries revoke flag + feature matrix; desktop enforces locally. Commercial modules read their own per-feature flags from the same response.</div>
+    </div>
+    <div class="box red">
+      <div class="title">Auto-update channel</div>
+      <div class="note">electron-updater against a signed release feed (GitHub Releases or self-hosted). Plan tiers can gate update stream (beta / stable).</div>
+    </div>
+    <div class="box red">
+      <div class="title">Local data (user's disk)</div>
+      <div class="note">Agents / colonies / memories live in <span class="pill">~/.hive</span> on the user's machine — no server copy by default; optional sync via commercial module.</div>
+    </div>
+  </div>
+</div>
+
+<div class="flow">↕ both planes run the same Hive runtime internals ↕</div>
+
+<!-- HIVE RUNTIME INTERNALS -->
+<div class="layer">
+  <div class="layer-head">
+    <div class="name">5 · Hive runtime — the agent harness inside both data planes</div>
+    <div class="hint">same code, three packaging variants</div>
+  </div>
+  <div class="boxes">
+    <div class="box green">
+      <div class="title">framework / core</div>
+      <div class="note">Agent loop, queens &amp; worker bees, colonies, orchestrator, pipeline, runtime state, LLM router, credentials, debugger, observability. Python · uv-managed · <span class="pill">hive serve</span> CLI.</div>
+    </div>
+    <div class="box green">
+      <div class="title">tools</div>
+      <div class="note">GCU suite (browser bridge + browser_* tools, screen, files, coder), skill library, MCP server registry, web_scrape_tool (Playwright). One shared tool plane across cloud and desktop.</div>
+    </div>
+    <div class="box yellow">
+      <div class="title">commercial</div>
+      <div class="note">Closed-source workspace member. Present in <span class="pill">hive-desktop-runtime</span>; <strong>absent</strong> from the OSS <span class="pill">hive</span> used in today's cloud image. Need to decide: does the cloud path get commercial too?</div>
+    </div>
+    <div class="box yellow">
+      <div class="title">Hive Browser Bridge (Chrome ext.)</div>
+      <div class="note">Manifest V3 extension. Cloud: policy-force-installed via Chrome enterprise policy (packed .crx, local update server). Desktop: user installs from Chrome Web Store.</div>
+    </div>
+    <div class="box green">
+      <div class="title">Frontend SPA (<span class="pill">core/frontend</span>)</div>
+      <div class="note">Vite-built bundle served by <span class="pill">hive serve</span>. Same UI in the cloud sandbox dashboard and the desktop renderer. <span class="pill">dist/</span> ships pre-built.</div>
+    </div>
+    <div class="box red">
+      <div class="title">Runtime ↔ aden-hive bridge</div>
+      <div class="note">New: token-aware LLM router and metering shim. Forwards LLM calls through the entitled budget; emits usage events to the unified ingest. Lives in <span class="pill">framework/llm</span> or a new module.</div>
+    </div>
+  </div>
+</div>
+
+<h2>Hive distribution — three repos, one source spine</h2>
+<table class="gaps">
+  <thead>
+    <tr><th>Repo</th><th>Contents</th><th>Where it runs</th><th>State</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="tag">/home/timothy/aden/hive</td>
+      <td>uv workspace: <strong>core + tools</strong>. OSS. Apache-2.0.</td>
+      <td>Today's cloud PoC image (<span class="pill">hive-novnc:dev</span>); future OVH Firecracker cloud sandboxes.</td>
+      <td class="status-green">bundled into cloud image</td>
+    </tr>
+    <tr>
+      <td class="tag">/home/timothy/aden/hive-desktop-runtime</td>
+      <td>uv workspace: <strong>core + tools + commercial</strong>. Commercial module is closed source; scaffolded.</td>
+      <td>Inside the Electron shell as a subprocess on the user's machine.</td>
+      <td class="status-yellow">scaffolded, not packaged</td>
+    </tr>
+    <tr>
+      <td class="tag">/home/timothy/aden/hive-desktop</td>
+      <td>Electron app: TypeScript main / preload / renderer. <span class="pill">runtime.ts</span> supervises the Python subprocess.</td>
+      <td>End-user Mac / Windows / Linux desktop.</td>
+      <td class="status-yellow">scaffolded, no builds shipped</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="flow">↕</div>
+
+<!-- STORAGE / INFRA -->
+<div class="layer new">
+  <div class="layer-head">
+    <div class="name">6 · OVH infrastructure</div>
+    <div class="hint">compute + storage for the cloud sandbox fleet</div>
+    <div class="origin new">net-new</div>
+  </div>
+  <div class="boxes">
+    <div class="box red">
+      <div class="title">OVH bare-metal fleet</div>
+      <div class="note">Advance-5 × N for Firecracker hosts. Not ordered yet.</div>
+    </div>
+    <div class="box red">
+      <div class="title">OVH Public Cloud VMs</div>
+      <div class="note">Control-plane VMs: Nomad/Consul/Vault/Harbor/HAProxy. Not provisioned.</div>
+    </div>
+    <div class="box red">
+      <div class="title">OVH Object Storage</div>
+      <div class="note">Template bucket, build cache, public-builds mirror, user workspaces, VM memory snapshots.</div>
+    </div>
+    <div class="box red">
+      <div class="title">Harbor (self-hosted)</div>
+      <div class="note">OCI registry on OVH. Today we push to GCP Artifact Registry (PoC only).</div>
+    </div>
+    <div class="box red">
+      <div class="title">Vault</div>
+      <div class="note">Sandbox-host secrets; rotatable. Lives on OVH control plane.</div>
+    </div>
+    <div class="box red">
+      <div class="title">Private network (vRack)</div>
+      <div class="note">L2 between control plane and bare-metal; same OVH DC.</div>
+    </div>
+    <div class="box red">
+      <div class="title">Observability (OVH stack)</div>
+      <div class="note">Grafana + Loki + Tempo + Mimir for fleet telemetry; feed aggregates back to aden-hive tsdb.</div>
+    </div>
+  </div>
+</div>
+
+<div class="flow">↕ PoC substrate (torn down at OVH cutover) ↕</div>
+
+<!-- PoC -->
+<div class="layer">
+  <div class="layer-head">
+    <div class="name">7 · Day-1 PoC (GCP, disposable)</div>
+    <div class="hint">what's running right this minute</div>
+  </div>
+  <div class="boxes">
+    <div class="box green">
+      <div class="title">GCE VM</div>
+      <div class="note"><span class="pill">hive-novnc-poc</span> · e2-standard-4 · us-central1-a · 34.68.214.218.</div>
+    </div>
+    <div class="box green">
+      <div class="title">GCP Artifact Registry</div>
+      <div class="note"><span class="pill">us-central1-docker.pkg.dev/aden-487803/sandbox-images/hive-novnc:dev</span>.</div>
+    </div>
+    <div class="box green">
+      <div class="title">GCP Secret Manager</div>
+      <div class="note">One secret: <span class="pill">hive-kimi-api-key</span> — fetched by gce-startup.sh via metadata SA.</div>
+    </div>
+  </div>
+</div>
+
+<!-- GAP TABLE -->
+<h2>Gap list — prioritized</h2>
+<table class="gaps">
+  <thead>
+    <tr>
+      <th>Where</th>
+      <th>Gap</th>
+      <th>Why it matters</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td class="tag">aden-hive · 2</td><td>Sandbox controller + service (reuses Passport/JWT + team_id scoping)</td><td>Without it no user can create or see their own sandbox.</td></tr>
+    <tr><td class="tag">aden-hive · 2</td><td>Deployment-mode switch (cloud / desktop / auto) on team + user + session</td><td>The single field that decides which data plane a session uses.</td></tr>
+    <tr><td class="tag">aden-hive · 2</td><td>Desktop pairing + entitlement API</td><td>Device-code OAuth, short-lived JWT, plan/quota/feature matrix, remote kill.</td></tr>
+    <tr><td class="tag">aden-hive · 2</td><td>Unified usage ingest (accepts both orchestrator + desktop heartbeats)</td><td>One billing pipeline regardless of runtime; TimescaleDB rollup.</td></tr>
+    <tr><td class="tag">aden-hive · 3</td><td>Sandbox + desktop_client tables in Postgres; usage schema in TimescaleDB</td><td>Adds two models; reuses existing migration + RBAC patterns.</td></tr>
+    <tr><td class="tag">Desktop · 4B</td><td>Electron shell packaging + signing + electron-updater feed</td><td><span class="pill">hive-desktop</span> is scaffolded; needs prod packaging, code signing, notarization on Mac. Ship Mac first.</td></tr>
+    <tr><td class="tag">Desktop · 4B</td><td>Runtime bundling inside Electron (<span class="pill">hive-desktop-runtime</span>)</td><td>Embed Python + uv venv so users don't need Python installed. pyinstaller or uv's standalone mode.</td></tr>
+    <tr><td class="tag">Desktop · 4B</td><td>Heartbeat + offline buffer client</td><td>Users in airplane mode need to work; usage replays when online.</td></tr>
+    <tr><td class="tag">Hive · 5</td><td>Decide: does cloud also get commercial? Which modules?</td><td>Today's cloud image is OSS-only. If commercial modules gate paid features, cloud Pro plans need them too. Impacts licensing + image build.</td></tr>
+    <tr><td class="tag">Hive · 5</td><td>Runtime ↔ aden-hive LLM router + metering shim</td><td>Route LLM calls through an entitled budget; emit usage to aden-hive. Required for both cloud and desktop.</td></tr>
+    <tr><td class="tag">OVH · 4A</td><td>Sandbox orchestrator service (JWT verification ↔ aden-hive; FC VM lifecycle)</td><td>The load-bearing new service. Authenticates via aden-hive JWKS.</td></tr>
+    <tr><td class="tag">OVH · 5</td><td>Bare-metal + Public Cloud VMs (OVH account → Terraform apply)</td><td>Can't run FC on GKE cheaply; blocks the whole OVH side.</td></tr>
+    <tr><td class="tag">Edge · 1</td><td>Sandbox subdomain router + WS session affinity</td><td>Shareable URLs (<span class="pill">&lt;id&gt;.sandbox.hive.com</span>) + 45-min noVNC sessions. Cloud path only.</td></tr>
+    <tr><td class="tag">OVH · 4A</td><td>Hibernate / resume (FC snapshot ↔ Object Storage)</td><td>Long-running workloads need this — drives cost per MAU.</td></tr>
+    <tr><td class="tag">OVH · 4A</td><td>Per-user workspace overlay (mount + flush to Object Storage on stop)</td><td>Chrome profile + agents/colonies must survive restarts on the cloud path.</td></tr>
+    <tr><td class="tag">aden-hive · 0 / 2</td><td>Dashboard: sandbox + desktop sections, mode switch UI</td><td>Reuses existing SPA + auth; lets user flip cloud ↔ desktop per session.</td></tr>
+    <tr><td class="tag">aden-hive · 3</td><td>Verify / build Stripe billing hooks for sandbox-hours + desktop LLM tokens (may exist)</td><td>Check before scoping; needs one invoice line per mode.</td></tr>
+    <tr><td class="tag">OVH · 4A</td><td>Beeline bridge auto-wire via supervisord entry</td><td>Closes "browser tools work end-to-end" on the cloud path.</td></tr>
+    <tr><td class="tag">OVH · 5</td><td>Observability stack (feeds rolled-up metrics to aden-hive tsdb)</td><td>On-call for the fleet; per-user usage rollups for dashboard.</td></tr>
+    <tr><td class="tag">Edge · 1</td><td>WAF / rate-limit for sandbox subdomain (Cloudflare)</td><td>Browser sandboxes are attack surface; rate-limit WS churn.</td></tr>
+    <tr><td class="tag">OVH · 4A</td><td>CI/CD for sandbox image (auto-build, canary, rollback)</td><td>Manual docker build is fine for 1 engineer; not beyond.</td></tr>
+  </tbody>
+</table>
+
+<h2>Integration: two runtime paths, one control plane</h2>
+<p class="sub">aden-hive on GKE is the sole identity provider and billing system. The deployment-mode switch on the team/user decides which data plane handles a new session; both planes report usage back through the same pipe.</p>
+
+<h3 style="font-size:13px;color:var(--fg-dim);margin:12px 0 4px;">Cloud path (mode = <span class="pill">cloud</span>)</h3>
+<ol>
+  <li>User calls <span class="pill">POST /api/sandboxes</span> on aden-hive with JWT / API key.</li>
+  <li>Sandbox controller validates team + quota, creates a Postgres row, then calls the OVH orchestrator over mTLS with a short-lived signed request (team_id, sandbox_id, template_id).</li>
+  <li>OVH orchestrator schedules a Firecracker microVM on Nomad, writes back host + sandbox_id, returns <span class="pill">&lt;id&gt;.sandbox.hive.com</span>.</li>
+  <li>User's browser hits that subdomain; edge router resolves to the owning bare-metal host; orchestrator proxy routes to <span class="pill">:6080</span> (noVNC) or <span class="pill">:8787</span> (Hive API).</li>
+  <li>Sandbox events (boot, idle, hibernate, exit) and per-LLM-call usage stream to aden-hive's unified usage ingest; TimescaleDB rollups drive billing.</li>
+</ol>
+
+<h3 style="font-size:13px;color:var(--fg-dim);margin:16px 0 4px;">Desktop path (mode = <span class="pill">desktop</span>)</h3>
+<ol>
+  <li>User installs the desktop app <span class="pill">hive-desktop</span> (signed Electron bundle). First launch runs device-code OAuth against aden-hive → app receives refresh token, persists to OS keychain.</li>
+  <li>Electron main process (<span class="pill">src/main/runtime.ts</span>) spawns the bundled <span class="pill">hive-desktop-runtime</span> Python subprocess on <span class="pill">127.0.0.1</span>. Renderer talks to it over IPC + SSE (<span class="pill">src/main/sse.ts</span>, <span class="pill">ipc.ts</span>).</li>
+  <li>App prompts user to install Hive Browser Bridge from Chrome Web Store (one-time, deep-linked).</li>
+  <li>App polls <span class="pill">GET /api/entitlement</span> every ~10 minutes: receives short-lived JWT, allowed model list, remaining LLM quota, feature flags (including which commercial modules activate for this plan), revoke flag. Enforces locally.</li>
+  <li>When the user runs an agent, no sandbox is provisioned anywhere — the runtime subprocess runs it in-process on their machine and drives the user's Chrome via the extension.</li>
+  <li>App batches usage events (LLM tokens, active-agent-seconds, tool invocations) and POSTs them to the same unified usage ingest every N seconds. Offline events are buffered to disk and replayed when online.</li>
+  <li>If aden-hive sets the revoke flag (plan lapsed, user removed, incident response), the next entitlement poll disables the runtime's agent loop on the desktop.</li>
+</ol>
+
+<h3 style="font-size:13px;color:var(--fg-dim);margin:16px 0 4px;">Auto mode (mode = <span class="pill">auto</span>)</h3>
+<p class="sub">
+Default for users with a paired desktop and a plan that allows cloud. The sandbox controller picks:
+desktop if the paired client heartbeated in the last 60s AND the agent task doesn't require the sharing features (watch via URL, team concurrency);
+cloud otherwise. Decision is stored on the session row for observability.
+</p>
+
+<footer>
+Source: <code>/home/timothy/aden/infra/plan/saas-architecture.html</code> ·
+cross-references <code>/home/timothy/aden/aden-hive/docs/CASA_SAQ_Responses.md</code> ·
+open in any browser.
+</footer>
+
+</div>
+</body>
+</html>

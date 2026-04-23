@@ -1,0 +1,120 @@
+Category,Item,Value,Unit,Source / Notes
+Inputs,Peak concurrent sandboxes,1000,VMs,Target at launch
+Inputs,Per-VM vCPU,1,vCPU,Single vCPU default
+Inputs,Per-VM RAM,2,GB,Chrome headful + Xvfb + Hive + OS
+Inputs,Per-VM disk,4,GB,OS 1.5 + Chrome 0.5 + workspace 2
+Inputs,CPU overcommit ratio,3,ratio,2=safe 3=browser-friendly 4=aggressive
+Inputs,Host RAM headroom,16,GB,Reserved per host for OS + orchestrator
+Inputs,MaxSandboxesPerNode flag,200,VMs,E2B soft cap; raise via LaunchDarkly
+Inputs,Storage per account,4,GB,Profile + workspace + memory snapshot
+Inputs,Active to total account ratio,0.2,ratio,0.2 = 5 accounts per concurrent slot
+Inputs,Workload mode,long-running,text,long-running (8-24hr agents) or short-task
+,,,,
+Prices,Advance-5 base (96 GB RAM),343,USD/month,Confirmed OVH US pricing 2026-04-19
+Prices,Advance-5 with 384 GB RAM,376,USD/month,Confirmed OVH configurator
+Prices,Advance-5 setup fee,343,USD one-time,Confirmed OVH pricing page
+Prices,Public Cloud VM b2-7 (2vCPU/7GB),45,USD/month,Estimated - verify in portal
+Prices,Public Cloud VM b2-15 (4vCPU/15GB),80,USD/month,Estimated
+Prices,Public Cloud VM c2-15 (4vCPU/15GB),100,USD/month,Estimated
+Prices,Public Cloud VM c2-30 (8vCPU/30GB),200,USD/month,Estimated
+Prices,Object Storage standard,0.01,USD/GB/month,Estimated
+Prices,OVH managed Postgres mid-tier,200,USD/month,Estimated
+Prices,OVH managed Redis mid-tier,100,USD/month,Estimated
+,,,,
+Fleet sizing,Host physical cores,24,cores,Advance-5 EPYC 8224P
+Fleet sizing,Host threads (SMT),48,threads,cores x 2
+Fleet sizing,vCPU offered per host,144,vCPU,threads x CPU overcommit
+Fleet sizing,VMs per host CPU-bound,144,VMs,vCPU offered / vCPU per VM
+Fleet sizing,Host RAM config,384,GB,
+Fleet sizing,Usable RAM per host,368,GB,RAM minus headroom
+Fleet sizing,VMs per host RAM-bound,184,VMs,usable RAM / RAM per VM
+Fleet sizing,VMs per host (effective),144,VMs,MIN of CPU RAM and cap
+Fleet sizing,Hosts needed,7,hosts,CEILING(concurrent / VMs per host)
+Fleet sizing,Bare-metal monthly cost,2632,USD/month,hosts x $376
+Fleet sizing,Setup fees amortized 12mo,200,USD/month,hosts x $343 / 12
+,,,,
+Control plane,Nomad + Consul servers (3 x b2-15),240,USD/month,
+Control plane,Vault cluster (3 x b2-7),135,USD/month,Raft backend
+Control plane,Harbor (2 x b2-15),160,USD/month,
+Control plane,Client-Proxy edge (2 x b2-7),90,USD/month,
+Control plane,ClickHouse self-host (1 x c2-30),250,USD/month,Includes high-IOPS volume
+Control plane,Monitoring (1 x c2-15),100,USD/month,Grafana + Loki + Tempo + Mimir
+Control plane,HAProxy LB (2 x b2-7),90,USD/month,
+Control plane,Managed Postgres,200,USD/month,
+Control plane,Managed Redis,100,USD/month,
+Control plane,Control plane subtotal,1365,USD/month,
+,,,,
+Storage,Total accounts (with hibernation),5000,accounts,concurrent / active ratio
+Storage,Total account storage,20000,GB,accounts x GB per account
+Storage,Object Storage cost,200,USD/month,storage x rate
+Storage,Template + build cache,5,USD/month,~500 GB
+Storage,Public egress (noVNC),0,USD/month,Included in Advance-5 bandwidth
+Storage,Storage subtotal,205,USD/month,
+,,,,
+Totals,Bare-metal fleet,2632,USD/month,
+Totals,Bare-metal setup amortized,200,USD/month,
+Totals,Control plane,1365,USD/month,
+Totals,Storage,205,USD/month,
+Totals,Contingency (10%),440,USD/month,
+Totals,Grand total monthly,4842,USD/month,
+,,,,
+Long-running capacity,Concurrent active sandboxes,1000,VMs,Input
+Long-running capacity,Total accounts (5x multiplier),5000,accounts,
+Long-running capacity,Daily active accounts,3300,DAU,
+Long-running capacity,Monthly active accounts,5000,MAU,
+Long-running capacity,Cost per total account,0.97,USD/account/month,
+Long-running capacity,Cost per DAU,1.47,USD/DAU/month,
+Long-running capacity,Cost per MAU,0.97,USD/MAU/month,
+,,,,
+Short-session capacity,Concurrent peak,1000,VMs,Input
+Short-session capacity,Average session duration,20,min,
+Short-session capacity,Sessions per user per day,2,sessions/day,
+Short-session capacity,Active hours per day,12,hours,
+Short-session capacity,Peak to average ratio,3,ratio,
+Short-session capacity,Slot turnovers per day,36,turnovers,active hrs x 60 / session min
+Short-session capacity,Daily sessions served,12000,sessions,concurrent / peak-to-avg x turnovers
+Short-session capacity,Daily active users,6000,DAU,sessions / sessions per user
+Short-session capacity,DAU to MAU ratio,0.33,ratio,
+Short-session capacity,Monthly active users,18000,MAU,DAU / ratio
+Short-session capacity,Cost per MAU,0.27,USD/MAU/month,
+Short-session capacity,Cost per DAU,0.81,USD/DAU/month,
+,,,,
+Scenario Conservative,CPU overcommit,2,ratio:1,Safest; CPU headroom
+Scenario Conservative,VMs per host,96,VMs,
+Scenario Conservative,Hosts needed,11,hosts,
+Scenario Conservative,Host RAM config,192,GB,
+Scenario Conservative,Host price,355,USD/month,Estimated - verify in configurator
+Scenario Conservative,Bare-metal monthly,3905,USD/month,
+Scenario Conservative,Total monthly all-in,6370,USD/month,
+Scenario Conservative,Cost per total account,1.27,USD/account/month,
+Scenario Conservative,Cost per MAU (short-session),0.35,USD/MAU/month,
+,,,,
+Scenario Baseline,CPU overcommit,3,ratio:1,Recommended; load-test to confirm
+Scenario Baseline,VMs per host,144,VMs,
+Scenario Baseline,Hosts needed,7,hosts,
+Scenario Baseline,Host RAM config,384,GB,
+Scenario Baseline,Host price,376,USD/month,Confirmed
+Scenario Baseline,Bare-metal monthly,2632,USD/month,
+Scenario Baseline,Total monthly all-in,4842,USD/month,
+Scenario Baseline,Cost per total account,0.97,USD/account/month,
+Scenario Baseline,Cost per MAU (short-session),0.27,USD/MAU/month,
+,,,,
+Scenario Aggressive,CPU overcommit,4,ratio:1,Requires MaxSandboxesPerNode override
+Scenario Aggressive,VMs per host,184,VMs,
+Scenario Aggressive,Hosts needed,6,hosts,
+Scenario Aggressive,Host RAM config,384,GB,
+Scenario Aggressive,Host price,376,USD/month,Confirmed
+Scenario Aggressive,Bare-metal monthly,2256,USD/month,
+Scenario Aggressive,Total monthly all-in,4400,USD/month,
+Scenario Aggressive,Cost per total account,0.88,USD/account/month,
+Scenario Aggressive,Cost per MAU (short-session),0.24,USD/MAU/month,
+,,,,
+Sensitivity,Per-VM RAM 2GB to 3GB,+50% bare-metal,change,Need larger RAM config or more hosts
+Sensitivity,Per-VM RAM 2GB to 1.5GB,-15% bare-metal,change,Fewer hosts at same RAM config
+Sensitivity,CPU OC 3:1 to 2:1,+50 to 60% bare-metal,change,
+Sensitivity,CPU OC 3:1 to 4:1,-14% bare-metal,change,
+Sensitivity,Peak concurrent 1k to 2k,+50% total,change,Compute scales; control plane flat
+Sensitivity,Active ratio 0.2 to 0.4,+100% storage,change,And half the account capacity
+Sensitivity,Hibernation off (ratio 1.0),-95% storage,change,Account capacity equals concurrent
+Sensitivity,Workload flip to short-task,~5x user capacity,change,Cost per MAU drops proportionally
+Sensitivity,Add 2 burst hosts,+750 to 1500 USD/month,change,2 hot-spare Advance-5

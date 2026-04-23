@@ -1,0 +1,12 @@
+{
+  "llm": {
+    "provider": "kimi",
+    "model": "kimi-k2.5",
+    "max_tokens": 32768,
+    "max_context_tokens": 240000,
+    "api_key_env_var": "KIMI_API_KEY",
+    "api_base": "https://api.kimi.com/coding"
+  },
+  "created_at": "2026-04-19T17:19:08+00:00",
+  "gcu_enabled": true
+}
