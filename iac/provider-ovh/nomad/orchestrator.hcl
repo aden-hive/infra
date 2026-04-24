@@ -86,6 +86,15 @@ job "orchestrator" {
         mode     = "fail"
       }
 
+      // Template builds unpack multi-GB OCI images and hold multi-GB
+      // memfile/rootfs in memory while chunking/uploading. Nomad's 300MB
+      // default OOM-kills the process mid-build.
+      resources {
+        cpu        = 4000
+        memory     = 8192
+        memory_max = 32768
+      }
+
       // Required secrets, stored at nomad/jobs/orchestrator (auto-readable via
       // task workload identity — no ACL policy needed).
       //   sudo nomad var put nomad/jobs/orchestrator \
@@ -110,7 +119,12 @@ EOT
         ENVIRONMENT            = "prod"
         GRPC_PORT              = "${NOMAD_PORT_grpc}"
         PROXY_PORT             = "${NOMAD_PORT_proxy}"
-        ORCHESTRATOR_SERVICES  = "orchestrator"
+        // Host-shared firewall/hyperloop/egress-proxy ports make running
+        // orchestrator and template-manager as separate processes on the
+        // same box collide. On single-host we co-locate both services in
+        // one process; on multi-host template-manager would move to a
+        // dedicated `build` node.
+        ORCHESTRATOR_SERVICES  = "orchestrator,template-manager"
         OTEL_SDK_DISABLED      = "true"
         GIN_MODE               = "release"
         PROVIDER               = "ovh"

@@ -12,6 +12,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       dbus-x11 procps openssl \
       python3.11 python3.11-venv python3-pip \
       build-essential libpq-dev \
+      systemd systemd-sysv openssh-server sudo chrony socat \
+      fuse3 iptables git nfs-common \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /etc/apt/keyrings \

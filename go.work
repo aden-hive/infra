@@ -18,4 +18,5 @@ use (
 	./tools/s3-smoke
 	./tools/sandbox-ctl
 	./tools/gen-api-key
+	./tools/template-ctl
 )
