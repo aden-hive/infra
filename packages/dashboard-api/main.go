@@ -187,7 +187,7 @@ func run() int {
 
 	authCache := sharedauth.NewAuthCache[*types.Team](redisClient)
 	authStore := sharedauth.NewAuthStore(authDB)
-	authService := sharedauth.NewAuthService[*types.Team](authStore, authCache, config.SupabaseJWTSecrets)
+	authService := sharedauth.NewAuthService[*types.Team](authStore, authCache, config.JWTSecrets)
 	defer authService.Close(ctx)
 
 	teamProvisionSink, err := internalteamprovision.NewProvisionSink(

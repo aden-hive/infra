@@ -59,10 +59,12 @@ type Config struct {
 
 	VolumesToken VolumesTokenConfig
 
-	// SupabaseJWTSecrets is a list of secrets used to verify the Supabase JWT.
-	// More secrets are possible in the case of JWT secret rotation where we need to accept
-	// tokens signed with the old secret for some time.
-	SupabaseJWTSecrets []string `env:"SUPABASE_JWT_SECRETS"`
+	// JWTSecrets is a list of HS256 secrets used to verify incoming bearer
+	// JWTs. The name "Supabase" was historical — there is no Supabase
+	// runtime dependency, just signature verification. Multiple values are
+	// supported for rotation: tokens signed with any listed secret are
+	// accepted while the old key is being phased out.
+	JWTSecrets []string `env:"JWT_SECRETS"`
 
 	DefaultKernelVersion string `env:"DEFAULT_KERNEL_VERSION"`
 

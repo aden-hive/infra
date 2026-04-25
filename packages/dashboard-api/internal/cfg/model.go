@@ -11,7 +11,7 @@ type Config struct {
 	PostgresConnectionString   string   `env:"POSTGRES_CONNECTION_STRING,required,notEmpty"`
 	ClickhouseConnectionString string   `env:"CLICKHOUSE_CONNECTION_STRING"`
 	AdminToken                 string   `env:"ADMIN_TOKEN,required,notEmpty"`
-	SupabaseJWTSecrets         []string `env:"SUPABASE_JWT_SECRETS"`
+	JWTSecrets                 []string `env:"JWT_SECRETS"`
 
 	AuthDBConnectionString            string `env:"AUTH_DB_CONNECTION_STRING"`
 	AuthDBReadReplicaConnectionString string `env:"AUTH_DB_READ_REPLICA_CONNECTION_STRING"`

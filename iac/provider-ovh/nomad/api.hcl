@@ -3,10 +3,9 @@
 // so client-proxy can route cross-host.
 //
 // Auth model for OVH self-host:
-//   SUPABASE_JWT_SECRETS — plain HS256 secret(s). Anything that can produce a
-//     Supabase-shaped JWT (exp, sub=user_id claims) and sign with one of
-//     these secrets will be accepted. aden-hive's Passport-JWT signer can
-//     use the same secret.
+//   JWT_SECRETS — plain HS256 secret(s) used to verify incoming bearer JWTs
+//     (the env var was historically SUPABASE_JWT_SECRETS, since renamed).
+//     hive-backend's Passport-JWT signer signs with the same secret.
 //   ADMIN_TOKEN — service-to-service bearer for admin endpoints (POST
 //     /sandboxes/admin/..., etc). Good enough for PoC without wiring JWTs.
 //
@@ -101,7 +100,7 @@ POSTGRES_CONNECTION_STRING={{ .POSTGRES_CONNECTION_STRING }}
 REDIS_URL={{ .REDIS_URL }}
 NOMAD_TOKEN={{ .NOMAD_TOKEN }}
 ADMIN_TOKEN={{ .ADMIN_TOKEN }}
-SUPABASE_JWT_SECRETS={{ .SUPABASE_JWT_SECRETS }}
+JWT_SECRETS={{ .JWT_SECRETS }}
 SANDBOX_ACCESS_TOKEN_HASH_SEED={{ .SANDBOX_ACCESS_TOKEN_HASH_SEED }}
 VOLUME_TOKEN_SIGNING_KEY={{ .VOLUME_TOKEN_SIGNING_KEY }}
 {{ end }}

@@ -152,7 +152,7 @@ func NewAPIStore(ctx context.Context, tel *telemetry.Client, redisClient redis.U
 
 	authCache := sharedauth.NewAuthCache[*types.Team](redisClient)
 	authStore := sharedauth.NewAuthStore(authDB)
-	authService := sharedauth.NewAuthService[*types.Team](authStore, authCache, config.SupabaseJWTSecrets)
+	authService := sharedauth.NewAuthService[*types.Team](authStore, authCache, config.JWTSecrets)
 	templateCache := templatecache.NewTemplateCache(sqlcDB, redisClient)
 	templateSpawnCounter := utils.NewTemplateSpawnCounter(ctx, time.Minute, sqlcDB)
 
