@@ -12,6 +12,11 @@ type Config struct {
 	RedisPoolSize    int    `env:"REDIS_POOL_SIZE"     envDefault:"40"`
 
 	ApiGrpcAddress string `env:"API_GRPC_ADDRESS"`
+
+	// HS256 secret used by hive-backend to sign embed tokens for the
+	// noVNC iframe and websockify upgrade. Empty disables verification
+	// (e.g. local dev). Must match hive-backend's E2B_EMBED_TOKEN_SECRET.
+	EmbedTokenSecret string `env:"EMBED_TOKEN_SECRET"`
 }
 
 func Parse() (Config, error) {

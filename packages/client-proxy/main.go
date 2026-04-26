@@ -166,6 +166,15 @@ func run() int {
 		return 1
 	}
 
+	// Wrap the proxy handler with embed-token verification so unauthenticated
+	// hits to <port>-<sandboxId>.vm.open-hive.com are rejected before any
+	// catalog lookup. Empty secret = passthrough (local dev).
+	if config.EmbedTokenSecret == "" {
+		l.Warn(ctx, "EMBED_TOKEN_SECRET not set; sandbox subdomain auth disabled (passthrough)")
+	} else {
+		trafficProxy.Server.Handler = e2bproxy.EmbedTokenMiddleware(config.EmbedTokenSecret)(trafficProxy.Server.Handler)
+	}
+
 	// Health check server
 	healthAddr := fmt.Sprintf("0.0.0.0:%d", config.HealthPort)
 	healthHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
