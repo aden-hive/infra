@@ -40,6 +40,7 @@ func main() {
 		diskMB := fs.Int("disk", 6144, "disk MB")
 		hugepages := fs.Bool("hugepages", false, "use hugepages")
 		startCmd := fs.String("start-cmd", "", "start command (run inside sandbox)")
+		readyCmd := fs.String("ready-cmd", "", "ready command (run inside sandbox to gate snapshot; default is sleep 20)")
 		teamID := fs.String("team", "00000000-0000-0000-0000-000000000000", "team id")
 		_ = fs.Parse(os.Args[2:])
 		if *tmpl == "" || *build == "" {
@@ -62,6 +63,7 @@ func main() {
 			FirecrackerVersion: *fc,
 			HugePages:          *hugepages,
 			StartCommand:       *startCmd,
+			ReadyCommand:       *readyCmd,
 			TeamID:             *teamID,
 			Source:             &tmplmgr.TemplateConfig_FromImage{FromImage: *fromImage},
 		}

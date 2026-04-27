@@ -51,7 +51,14 @@ RUN chmod +x /usr/local/bin/start-chrome.sh
 
 COPY hive-src /opt/hive
 WORKDIR /opt/hive
-RUN /usr/local/bin/uv sync --no-dev 2>&1 | tail -10
+# `--frozen` uses the exact lockfile resolution, so the build-time venv
+# matches what runtime would otherwise resolve. Without this, `uv run`
+# re-syncs at first call (Uninstalled X / Installed Y) and delays hive
+# serve startup past the orchestrator's 20s snapshot deadline.
+RUN /usr/local/bin/uv sync --frozen 2>&1 | tail -10
+# Smoke-test the venv's hive script imports cleanly so failures surface
+# at build time, not at first VM boot.
+RUN /opt/hive/.venv/bin/hive --help >/dev/null
 
 # Pre-seed /root/.hive/configuration.json so `hive serve` doesn't demand quickstart.
 # The API key (KIMI_API_KEY) is NOT baked here; pass via docker run -e.
