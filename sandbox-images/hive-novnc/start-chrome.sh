@@ -20,6 +20,6 @@ exec google-chrome-stable \
   --user-data-dir=/data/chrome \
   --remote-debugging-port=9222 \
   --remote-debugging-address=127.0.0.1 \
-  --start-maximized \
-  --window-size=1280,800 \
+  --window-size=1100,720 \
+  --window-position=80,40 \
   https://www.google.com
