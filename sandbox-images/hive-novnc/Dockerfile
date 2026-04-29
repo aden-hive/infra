@@ -3,13 +3,12 @@ FROM debian:bookworm-slim
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
-# LLM provider key baked into the snapshot. Read by hive serve via the
-# api_key_env_var pointer in /root/.hive/configuration.json. Staging
-# shortcut — every sandbox spawned from this template uses the same
-# shared key. Per-user BYOK is deferred. Keep this image private to
-# OVH's local registry.
-ARG KIMI_API_KEY=""
-ENV KIMI_API_KEY=$KIMI_API_KEY
+# Per-user LLM auth: no provider key baked in. The desktop pushes a
+# per-user JWT (the "stream token") into the VM via PUT /api/config/llm
+# right after spawn — see configureRemoteLlm in hive-desktop's
+# remote-runtime.ts. Hive serve in the VM stores it in its credential
+# store and authenticates outbound calls to the hive-llm proxy as the
+# signed-in user. No shared baked-in KIMI_API_KEY anymore.
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl wget gnupg \
@@ -45,18 +44,6 @@ COPY pack-and-policy.sh /usr/local/bin/pack-and-policy.sh
 RUN chmod +x /usr/local/bin/pack-and-policy.sh && /usr/local/bin/pack-and-policy.sh
 
 COPY supervisord.conf /etc/supervisor/conf.d/sandbox.conf
-
-# Bake KIMI_API_KEY directly into supervisord's [program:hive] block.
-# Docker ENV / /etc/environment don't propagate through systemd-launched
-# children: systemd unit files have an empty environment by default, and
-# /etc/environment is PAM-only, so when supervisord (or whatever starts
-# it post-snapshot) runs, the env is gone. Writing it into supervisord.conf
-# guarantees the [program:hive] subprocess sees it regardless of how
-# supervisord itself was launched.
-RUN if [ -n "$KIMI_API_KEY" ]; then \
-      sed -i "/^\[program:hive\]/a environment=KIMI_API_KEY=\"$KIMI_API_KEY\"" \
-        /etc/supervisor/conf.d/sandbox.conf; \
-    fi
 
 # Make the base supervisor install E2B-template-builder friendly.
 # envd runs the sandbox start-cmd as a constrained user that can't write to
