@@ -989,9 +989,11 @@ func (s *Sandbox) doStop(ctx context.Context) error {
 		errs = append(errs, fmt.Errorf("failed to stop FC: %w", fcStopErr))
 	}
 
-	// The process exited, we can continue with the rest of the cleanup.
-	// We could use select with ctx.Done() to wait for cancellation, but if the process is not exited the whole cleanup will be in a bad state and will result in unexpected behavior.
-	<-s.process.Exit.Done()
+	// The process should exit before the rest of cleanup, but memory shutdown
+	// must still run if the wait context is canceled so UFFD can exit.
+	if waitErr := s.process.Exit.WaitWithContext(ctx); waitErr != nil {
+		errs = append(errs, fmt.Errorf("failed waiting for FC exit: %w", waitErr))
+	}
 
 	uffdStopErr := s.Resources.memory.Stop()
 	if uffdStopErr != nil {
@@ -1320,15 +1322,7 @@ func getNetworkSlot(
 			ctx, span := tracer.Start(ctx, "clean network-slot")
 			defer span.End()
 
-			// We can run this cleanup asynchronously, as it is not important for the sandbox lifecycle
-			go func(ctx context.Context) {
-				returnErr := networkPool.Return(ctx, slot, networkReleased, network.ReturnDelay)
-				if returnErr != nil {
-					logger.L().Error(ctx, "failed to return network slot", zap.Error(returnErr))
-				}
-			}(context.WithoutCancel(ctx))
-
-			return nil
+			return networkPool.Return(ctx, slot, networkReleased, network.ReturnDelay)
 		})
 
 		return slot, nil

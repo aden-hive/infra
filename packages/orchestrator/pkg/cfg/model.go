@@ -103,6 +103,7 @@ type Config struct {
 	RedisPoolSize              int               `env:"REDIS_POOL_SIZE"               envDefault:"5"`
 	RedisMinIdleConns          int               `env:"REDIS_MIN_IDLE_CONNS"          envDefault:"2"`
 	NBDPoolSize                int               `env:"NBD_POOL_SIZE"                 envDefault:"64"`
+	SandboxDrainTimeout        time.Duration     `env:"SANDBOX_DRAIN_TIMEOUT"         envDefault:"48h"`
 	Services                   []string          `env:"ORCHESTRATOR_SERVICES"         envDefault:"orchestrator"`
 	PersistentVolumeMounts     map[string]string `env:"PERSISTENT_VOLUME_MOUNTS"`
 }

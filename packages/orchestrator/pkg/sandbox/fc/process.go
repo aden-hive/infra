@@ -673,7 +673,7 @@ func (p *Process) Stop(ctx context.Context) error {
 	// this function should never fail b/c a previous context was canceled.
 	ctx = context.WithoutCancel(ctx)
 
-	err := p.cmd.Process.Signal(syscall.SIGTERM)
+	err := signalProcessGroup(p.cmd.Process.Pid, syscall.SIGTERM)
 	if err != nil {
 		if errors.Is(err, os.ErrProcessDone) {
 			logger.L().Info(ctx, "fc process already exited", logger.WithSandboxID(p.files.SandboxID))
@@ -688,19 +688,26 @@ func (p *Process) Stop(ctx context.Context) error {
 		select {
 		// Wait 10 sec for the FC process to exit, if it doesn't, send SIGKILL.
 		case <-time.After(10 * time.Second):
+			select {
+			case <-p.Exit.Done():
+				return
+			default:
+			}
+
 			// Check process status right before Kill — the pre-SIGTERM status
 			// captured above is 10s stale and no longer useful here.
 			status, stateErr := getProcessStatus(p.cmd.Process.Pid)
 			if errors.Is(stateErr, process.ErrorProcessNotRunning) {
-				// Process already exited, no need to send SIGKILL.
+				logger.L().Info(ctx, "fc parent process exited before SIGKILL; skipping process group signal", logger.WithSandboxID(p.files.SandboxID))
+
 				return
 			} else if stateErr != nil {
 				logger.L().Warn(ctx, "failed to get fc process status before SIGKILL", zap.Error(stateErr), logger.WithSandboxID(p.files.SandboxID))
 			}
 
-			err := p.cmd.Process.Kill()
+			err := signalProcessGroup(p.cmd.Process.Pid, syscall.SIGKILL)
 			if err == nil {
-				logger.L().Info(ctx, "sent SIGKILL to fc process because it was not responding to SIGTERM for 10 seconds",
+				logger.L().Info(ctx, "sent SIGKILL to fc process group because it was not responding to SIGTERM for 10 seconds",
 					zap.Strings("status", status),
 					logger.WithSandboxID(p.files.SandboxID),
 				)
@@ -714,6 +721,25 @@ func (p *Process) Stop(ctx context.Context) error {
 			return
 		}
 	}()
+
+	return nil
+}
+
+func signalProcessGroup(pid int, signal syscall.Signal) error {
+	if pid <= 0 {
+		return os.ErrProcessDone
+	}
+
+	// Firecracker is launched with Setsid, so the process PID is also the process
+	// group ID. Signal the group so unshare/bash/ip descendants cannot keep the VM
+	// mount namespace or Firecracker process alive after shutdown.
+	if err := syscall.Kill(-pid, signal); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+
+		return err
+	}
 
 	return nil
 }

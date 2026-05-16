@@ -575,8 +575,8 @@ func run(config cfg.Config, opts Options) (success bool) {
 	if err != nil {
 		logger.L().Fatal(ctx, "failed to create orchestrator server", zap.Error(err))
 	}
-	closers = append(closers, closer{"orchestrator server", func(context.Context) error {
-		return orchestratorService.Close()
+	closers = append(closers, closer{"orchestrator server", func(closeCtx context.Context) error {
+		return orchestratorService.Close(closeCtx)
 	}})
 
 	// template manager sandbox logger
@@ -779,6 +779,35 @@ func run(config cfg.Config, opts Options) (success bool) {
 		if err != nil {
 			logger.L().Error(ctx, "error while waiting for template manager to drain", zap.Error(err))
 			success = false
+		}
+	}
+
+	if orchestratorService != nil {
+		var drainCtx context.Context
+		var cancelDrain context.CancelFunc
+		if !config.ForceStop && config.SandboxDrainTimeout > 0 {
+			drainCtx, cancelDrain = context.WithTimeout(closeCtx, config.SandboxDrainTimeout)
+		} else {
+			drainCtx, cancelDrain = context.WithCancel(closeCtx)
+			cancelDrain()
+		}
+
+		logger.L().Info(ctx, "Starting sandbox drain phase",
+			zap.Duration("timeout", config.SandboxDrainTimeout),
+			zap.Bool("forced", config.ForceStop),
+			zap.Int("sandbox_count", sandboxes.Count()),
+		)
+
+		err := orchestratorService.DrainSandboxes(drainCtx)
+		cancelDrain()
+		if err != nil {
+			logger.L().Warn(ctx, "sandbox drain phase did not complete gracefully; forcing sandbox shutdown", zap.Error(err))
+
+			forceErr := orchestratorService.ForceStopSandboxes(context.WithoutCancel(ctx))
+			if forceErr != nil {
+				logger.L().Error(ctx, "forced sandbox shutdown failed", zap.Error(forceErr))
+				success = false
+			}
 		}
 	}
 
