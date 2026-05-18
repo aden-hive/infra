@@ -627,10 +627,6 @@ func (s *Server) Checkpoint(ctx context.Context, in *orchestrator.SandboxCheckpo
 	// the API, routing catalog, and analytics) but with a fresh LifecycleID
 	// so the old sandbox's cleanup goroutine won't
 	// accidentally evict the resumed sandbox from the map.
-	if err := s.rejectIfDraining(ctx, "sandbox-checkpoint-before-resume"); err != nil {
-		return nil, err
-	}
-
 	resumedSbx, err := s.sandboxFactory.ResumeSandbox(
 		ctx,
 		template,
@@ -852,7 +848,10 @@ func (s *Server) uploadSnapshotAsync(ctx context.Context, sbx *sandbox.Sandbox, 
 
 // setupSandboxLifecycle sets up the cleanup goroutine for a sandbox.
 func (s *Server) setupSandboxLifecycle(ctx context.Context, sbx *sandbox.Sandbox) {
+	s.sandboxFactory.Sandboxes.TrackLifecycle(ctx, sbx, sandbox.SandboxStateRunning)
 	s.sandboxLifecycleWG.Go(func() {
+		defer s.sandboxFactory.Sandboxes.MarkStopped(context.WithoutCancel(ctx), sbx)
+
 		ctx, childSpan := tracer.Start(context.WithoutCancel(ctx), "stop sandbox-lifecycle", trace.WithNewRoot())
 		defer childSpan.End()
 

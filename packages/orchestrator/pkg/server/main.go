@@ -218,7 +218,7 @@ func (s *Server) ForceStopSandboxes(ctx context.Context) error {
 		return err
 	}
 
-	sandboxes := s.sandboxFactory.Sandboxes.Items()
+	sandboxes := s.sandboxFactory.Sandboxes.LifecycleItems()
 	logger.L().Warn(ctx, "starting forced sandbox shutdown", zap.Int("sandbox_count", len(sandboxes)))
 	if len(sandboxes) == 0 {
 		return s.waitSandboxLifecycles(ctx)
