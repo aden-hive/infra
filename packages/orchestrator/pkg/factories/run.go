@@ -119,6 +119,16 @@ func (e serviceDoneError) Error() string {
 	return fmt.Sprintf("service %s finished", e.name)
 }
 
+func isServiceDoneError(err error) bool {
+	var sde serviceDoneError
+
+	return errors.As(err, &sde)
+}
+
+func isIgnorableSyncError(err error) bool {
+	return errors.Is(err, syscall.EINVAL)
+}
+
 // Run starts the orchestrator, blocking until shutdown.
 // Returns true on clean shutdown.
 func Run(opts Options) bool {
@@ -234,7 +244,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 	// there's a panic.
 	defer func(g *errgroup.Group) {
 		err := g.Wait()
-		if err != nil {
+		if err != nil && !isServiceDoneError(err) {
 			log.Printf("error while shutting down: %v", err)
 			success = false
 		}
@@ -275,7 +285,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 	}))
 	defer func(l logger.Logger) {
 		err := l.Sync()
-		if err != nil {
+		if err != nil && !isIgnorableSyncError(err) {
 			log.Printf("error while shutting down logger: %v", err)
 			success = false
 		}
@@ -293,7 +303,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 	)
 	defer func(l logger.Logger) {
 		err := l.Sync()
-		if err != nil {
+		if err != nil && !isIgnorableSyncError(err) {
 			log.Printf("error while shutting down sandbox logger: %v", err)
 			success = false
 		}
@@ -311,7 +321,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 	)
 	defer func(l logger.Logger) {
 		err := l.Sync()
-		if err != nil {
+		if err != nil && !isIgnorableSyncError(err) {
 			log.Printf("error while shutting down sandbox logger: %v", err)
 			success = false
 		}
@@ -591,8 +601,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 	)
 	closers = append(closers, closer{
 		"template manager sandbox logger", func(context.Context) error {
-			// Sync returns EINVAL when path is /dev/stdout (for example)
-			if err := tmplSbxLoggerExternal.Sync(); err != nil && !errors.Is(err, syscall.EINVAL) {
+			if err := tmplSbxLoggerExternal.Sync(); err != nil && !isIgnorableSyncError(err) {
 				return err
 			}
 
@@ -822,8 +831,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 	}
 
 	logger.L().Info(ctx, "Waiting for services to finish")
-	var sde serviceDoneError
-	if err := g.Wait(); err != nil && !errors.As(err, &sde) {
+	if err := g.Wait(); err != nil && !isServiceDoneError(err) {
 		logger.L().Error(ctx, "service group error", zap.Error(err))
 		success = false
 	}
