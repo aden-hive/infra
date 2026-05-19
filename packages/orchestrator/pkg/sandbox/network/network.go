@@ -18,7 +18,7 @@ import (
 	"github.com/e2b-dev/infra/packages/shared/pkg/logger"
 )
 
-func (s *Slot) CreateNetwork(ctx context.Context) error {
+func (s *Slot) CreateNetwork(ctx context.Context) (retErr error) {
 	// Prevent thread changes so we can safely manipulate with namespaces
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
@@ -29,10 +29,19 @@ func (s *Slot) CreateNetwork(ctx context.Context) error {
 		return fmt.Errorf("cannot get current (host) namespace: %w", err)
 	}
 
+	cleanupNeeded := false
 	defer func() {
-		err = netns.Set(hostNS)
-		if err != nil {
-			logger.L().Error(ctx, "error resetting network namespace back to the host namespace", zap.Error(err))
+		restoreErr := netns.Set(hostNS)
+		if restoreErr != nil {
+			logger.L().Error(ctx, "error resetting network namespace back to the host namespace", zap.Error(restoreErr))
+		}
+
+		if retErr != nil && cleanupNeeded {
+			if restoreErr != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("error resetting network namespace back to the host namespace before cleanup: %w", restoreErr))
+			} else if cleanupErr := s.RemoveNetwork(); cleanupErr != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("error cleaning up partially created network: %w", cleanupErr))
+			}
 		}
 
 		err = hostNS.Close()
@@ -46,6 +55,7 @@ func (s *Slot) CreateNetwork(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("cannot create new namespace: %w", err)
 	}
+	cleanupNeeded = true
 
 	defer ns.Close()
 
