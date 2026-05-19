@@ -9,9 +9,7 @@ Files audited: `packages/shared/pkg/storage/{compress_*,header/*,gcp_multipart*,
 `packages/orchestrator/pkg/sandbox/{block,build,template,uploads.go,build_upload*.go,sandbox.go}`.
 All affected unit tests pass under `-race`.
 
-Re-verified after rebase on main (2026-05-19, base `00907f99c`). B1 is now
-fixed in main via [#2585](https://github.com/e2b-dev/infra/pull/2585); B2–B7
-still present. New findings: [B9](#b9-multipartuploaderuploadfileinparallel-leaks-the-multipart-upload-when-checksum-fails-after-a-successful-data-upload).
+Last re-verified after rebase on main 2026-05-19 (base `00907f99c`).
 
 ---
 
@@ -28,21 +26,14 @@ still present. New findings: [B9](#b9-multipartuploaderuploadfileinparallel-leak
    (default is 1 — single-threaded per file in prod today) and dropping to
    **zstd level 1** (≈25 % faster, ratio 0.36 vs 0.28 on our benchmark workload).
 
+Numbering note: B1 was the original V3→V4 P2P chunker bug; fixed in main by
+[#2585](https://github.com/e2b-dev/infra/pull/2585) (peerSeekable now
+re-resolves its base path per call from the live FrameTable). The entry was
+removed; B2–B9 numbers kept to preserve external link stability.
+
 ---
 
 ## Bugs
-
-### B1. Stale chunker after V3→V4 P2P transition — FIXED in main (#2585)
-
-PR [#2585](https://github.com/e2b-dev/infra/pull/2585) implemented variant
-(b): `peerSeekable` no longer caches the path at construction. `getBase`
-composes `Paths{BuildID, name}.DataFile(ct)` from the live
-`FrameTable.CompressionType()` on every call and reopens the base when `ct`
-changes (`packages/orchestrator/pkg/sandbox/template/peerclient/seekable.go:48-68`).
-After a V3→V4 swap, the next read through the cached chunker re-resolves to
-the `.zstd` path; the sticky `transitionEmitted` is not a problem because
-`getBase` runs on every subsequent call regardless. No chunker eviction in
-`File.retryOnTransition` is required.
 
 ### B2. Unbounded LZ4 header decompression (production risk)
 
@@ -101,24 +92,22 @@ will SIGSEGV the orchestrator.
 **Fix.** Return `(0, error)` from `WriteAtWithoutLock` if
 `len(b) < int(c.blockSize)`. One-liner test.
 
-### B5. No retry on V4 data 404 after `transitionEmitted` (gate)
+### B5. No retry on V4 data 404 after `transitionEmitted`
 
 After `transitionEmitted.CompareAndSwap(false, true)` returns
 `PeerTransitionedError`, the upper loop polls GCS for the *header* only.
-If the data object lookup later fails with `ErrObjectNotExist` (e.g. due to
-GCS gRPC client caching, multipart parts visibility lag, or storage
-eventual consistency on a freshly completed object), the failure is
-permanent because subsequent calls no longer raise
-`PeerTransitionedError` (sticky `true`).
+Upload order is data → header → `publish()`, so by the time the peer flips
+`UseStorage` (post-publish on the originator) both objects exist. The
+remaining risk is GCS gRPC client caching / multipart visibility lag on a
+freshly completed object: if the data lookup later fails with
+`ErrObjectNotExist`, the failure is permanent because subsequent calls no
+longer raise `PeerTransitionedError` (sticky `true`).
 
 **Where**: `packages/orchestrator/pkg/sandbox/template/peerclient/seekable.go:129-138`.
 
 **Fix.** Re-emit a recoverable transition error from `peerSeekable` when
-the base read fails with `ErrObjectNotExist` and
-`time.Since(transition) < someBudget`, so the upper loop re-polls and
-retries. Cleaner alternative: have the originator publish the V4 header
-with `IncompletePendingUpload=true` *before* uploading data so the
-transition only happens after the data path is queryable.
+the base read fails with `ErrObjectNotExist` within a short budget after
+the transition, so the upper loop re-polls and retries.
 
 ### B6. Per-frame zstd dst buffer never pooled (perf, see optimizations)
 
@@ -140,12 +129,8 @@ when `bd.Size ≤ frameSize` (≤ 2 MiB). For typical multi-MB diffs it would
 fail; CI is presumably running with diffs small enough to fit in one
 frame, so the multi-frame V4 path is *not* validated end-to-end.
 
-**Where**
-
-- `tests/integration/internal/tests/api/sandboxes/sandbox_rapid_pause_resume_test.go:138-162`.
-- `packages/shared/pkg/storage/storage_google.go:569-610` and
-  `packages/shared/pkg/storage/storage_fs.go:317-340` —
-  documented per-frame semantics; not a production bug.
+**Where**: `tests/integration/internal/tests/api/sandboxes/sandbox_rapid_pause_resume_test.go:138-162`
+(per-frame semantics on the storage side are documented behaviour).
 
 **Fix.** In the test, iterate frames via the `FrameTable` and decompress each
 through its own `OpenRangeReader` call; sum the decompressed bytes into the
@@ -153,9 +138,6 @@ hasher. Or expose a `ReadFullCompressed` helper that loops internally.
 
 ### B8. Other minor / follow-up items
 
-- `compressStream`: `io.ReadFull` in `readLoop` ignores `ctx` cancellation.
-  Currently fine because input is `*os.File`, but the surrounding
-  `defer close(q)` machinery assumes prompt return.
 - `runV4`: when `MemfileDiffHeader != nil` but `MemfileDiff.CachePath() == ""`,
   `Builds[u.buildID]` is still written with a zero `BuildData`. Consistent
   iff no mappings reference self in this case — true in practice but
@@ -174,28 +156,29 @@ hasher. Or expose a `ReadFullCompressed` helper that loops internally.
   because pooled slices may be released before
   `retryablehttp.ReaderFunc` is replayed. Land both together.
 
-### B9. `MultipartUploader.UploadFileInParallel` leaks the multipart upload when checksum fails after a successful data upload
+### B9. `MultipartUploader.UploadFileInParallel` leaks the multipart upload on checksum failure
 
 Added by PR [#2669](https://github.com/e2b-dev/infra/pull/2669): when
 `UploadFileInParallel` runs the SHA-256 in a sibling goroutine while parts
 upload, the post-wait sequence at
-`packages/shared/pkg/storage/gcp_multipart.go:436-449` does
-`parts, err := m.uploadParts(...); ...; if hashErr := eg.Wait(); err == nil
-{ err = hashErr }; if err != nil { return ... }`. If parts succeed but
-`io.Copy(hasher, hashFile)` returns an error (disk read EIO, etc.),
-`completeUpload` is never called and the initiated multipart upload remains
-abandoned in GCS until the bucket lifecycle expires it (default 7 days). Not
-a read-path correctness issue (the final object doesn't exist) but a real
-resource leak, and noisy in incidents where many uploads share a flaky disk.
+`packages/shared/pkg/storage/gcp_multipart.go:436-449` skips
+`completeUpload` whenever `eg.Wait()` returns an error (e.g. disk EIO on the
+sibling `io.Copy(hasher, hashFile)`). The initiated multipart upload then
+sits in GCS until the bucket lifecycle expires it (default 7 days). Not a
+read-path correctness issue, but a real resource leak that gets noisy on
+flaky disks.
 
-**Fix.** Either (a) call `m.abortUpload` on the failure path before returning,
-or (b) treat checksum failure as best-effort once data upload succeeds and
-still call `completeUpload`, logging the checksum error. (a) is safer.
+**Fix.** Either call `m.abortUpload` on the failure path before returning,
+or treat checksum failure as best-effort once data upload succeeds and call
+`completeUpload`, logging the checksum error. Abort is safer.
 
 ### Bugs ruled out (verified safe)
 
+- Original B1 (V3→V4 P2P chunker) — fixed by [#2585](https://github.com/e2b-dev/infra/pull/2585).
 - `compressStream` drain on error / `q` deadlock — the `cancel()` +
   `for range q` drain after `loopErr` is correct and bounded.
+- `compressStream`'s `io.ReadFull` ignoring `ctx` cancel: input is
+  `*os.File`, drain returns promptly on EOF/error.
 - Race on `p.frames` and `p.compressedSize` — `frames` only mutated by
   readLoop before the part is queued; uploader reads after `compress.Wait()`.
 - Zero-byte final frame.
@@ -207,6 +190,9 @@ still call `completeUpload`, logging the checksum error. (a) is safer.
   reflection over a 56-byte struct).
 - `extractRelevantRanges` + `TrimToRanges` dedup (verified by inspection
   and existing unit tests).
+- V4-for-uncompressed FF path ([#2669](https://github.com/e2b-dev/infra/pull/2669)):
+  `ft=nil` propagates through `FrameTable` helpers (all nil-safe) and the
+  read path correctly falls back to uncompressed `OpenRangeReader`.
 
 ---
 
@@ -421,10 +407,10 @@ through `compressConfig` lets ops tune them together.
 - [ ] Fix [B7](#b7-test-coverage-gap-openrangereader-returns-one-frame-test-expects-entire-file)
   so multi-frame compressed reads are actually validated end-to-end in CI.
 - [ ] Add an integration test that exercises **cross-orchestrator** P2P
-  resume during in-flight compressed upload — the path B1's fix unblocks
-  but nothing yet asserts.
+  resume during in-flight compressed upload (now that the original B1
+  chunker bug is fixed nothing asserts it doesn't regress).
 - [ ] Add a unit test for the V3→V4 ct-change path in `peerSeekable.getBase`
-  to lock in the [B1](#b1-stale-chunker-after-v3v4-p2p-transition--fixed-in-main-2585) fix.
+  to lock in the [#2585](https://github.com/e2b-dev/infra/pull/2585) fix.
 
 ---
 
