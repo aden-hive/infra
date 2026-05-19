@@ -9,21 +9,20 @@ Files audited: `packages/shared/pkg/storage/{compress_*,header/*,gcp_multipart*,
 `packages/orchestrator/pkg/sandbox/{block,build,template,uploads.go,build_upload*.go,sandbox.go}`.
 All affected unit tests pass under `-race`.
 
+Re-verified after rebase on main (2026-05-19, base `00907f99c`). B1 is now
+fixed in main via [#2585](https://github.com/e2b-dev/infra/pull/2585); B2–B7
+still present. New findings: [B9](#b9-multipartuploaderuploadfileinparallel-leaks-the-multipart-upload-when-checksum-fails-after-a-successful-data-upload).
+
 ---
 
 ## TL;DR — rollout gates
 
-1. **One critical bug must be fixed before enabling compression in production:**
-   the cached chunker bound to the V3 path survives the V3→V4 header swap
-   during cross-orch P2P resume, and the bug **must** be fixed together with an
-   explicit chunker eviction on `SwapHeader` (otherwise the fix is silently
-   defeated by the sticky `transitionEmitted` flag). See [B1](#b1-stale-chunker-after-v3v4-p2p-transition-rollout-gate).
-2. **Three production-risk bugs should land before broad enablement:**
+1. **Three production-risk bugs should land before broad enablement:**
    unbounded LZ4 header decompression ([B2](#b2-unbounded-lz4-header-decompression-production-risk)),
    10 s GCS read deadline that includes the entire decompressor drain
    ([B3](#b3-gcs-read-deadline-covers-the-whole-decompressor-drain-production-risk)),
    and `Cache.WriteAtWithoutLock` with no length guard ([B4](#b4-cachewriteatwithoutlock-panics-on-sub-blocksize-buffers-production-risk)).
-3. **Performance is at ~75–90 % of the zstd library ceiling**, no hidden
+2. **Performance is at ~75–90 % of the zstd library ceiling**, no hidden
    pipeline pathology. The two biggest production levers are
    [setting `frameEncodeWorkers` ≥ 4 in LD](#production-parallelism-read-this-before-tuning-anything)
    (default is 1 — single-threaded per file in prod today) and dropping to
@@ -33,52 +32,17 @@ All affected unit tests pass under `-race`.
 
 ## Bugs
 
-### B1. Stale chunker after V3→V4 P2P transition (rollout gate)
+### B1. Stale chunker after V3→V4 P2P transition — FIXED in main (#2585)
 
-**Triggers** during cross-orch P2P resume while peer A's compressed upload is
-in flight: B reads through the peer with a V3 (uncompressed-path) chunker; A
-finishes the upload, signals `UseStorage`; B's `File.retryOnTransition` swaps
-to the V4 header from GCS but `DiffStore.Get` returns the **same cached
-chunker** because the cache key omits compression type. Subsequent reads still
-target the V3 path (`{buildID}/memfile`); the V4 data is at
-`{buildID}/memfile.zstd`. Reads of any not-yet-cached blocks fail with
-`ErrObjectNotExist`.
-
-**Where**
-
-- `packages/orchestrator/pkg/sandbox/build/cache.go:100-104` — `GetDiffStoreKey`
-  is `"buildID/diffType"`, no `ct`.
-- `packages/orchestrator/pkg/sandbox/build/storage_diff.go:55-65` — captures
-  `storagePath = ...DataFile(diffType, ct)` *inside* the chunker but the
-  cache key drops `ct`.
-- `packages/orchestrator/pkg/sandbox/template/peerclient/storage.go:146-156` —
-  `peerSeekable.openFn` closure captures the path at creation.
-- `packages/orchestrator/pkg/sandbox/build/build.go:168-185` —
-  `retryOnTransition` swaps the header but does not evict the cached chunker.
-- `packages/orchestrator/pkg/sandbox/template/peerclient/seekable.go:30` —
-  `transitionEmitted atomic.Bool` is sticky once flipped, which makes the bug
-  permanent within the chunker's TTL even after the V4 swap.
-
-**Why tests miss it.** Integration test `TestSandboxRapidSnapshotForkChain`
-(PR #2532) verifies V4 header lineage and self-checksum on disk but does not
-exercise cross-orch reads during in-flight upload. The CI matrix runs
-single-orch with both uncompressed and zstd1, so the cross-orch routing path
-isn't hit. `peerSeekable` unit tests cover the `PeerTransitionedError`
-emission but not the chunker rebind on swap.
-
-**Fix (must do both).**
-
-1. Cause `DiffStore.Get` to return a chunker bound to the *current*
-   compression. Two clean variants:
-   - **a** include `ct` in `DiffStoreKey` (simplest; loses mmap on
-     transition);
-   - **b** make `peerSeekable.openFn` re-resolve the storage path lazily on
-     each `getOrOpenBase` call against the current `File` header (preserves
-     mmap; smallest behavioral diff).
-2. **Also** evict the cached `Diff` in `File.retryOnTransition` after a
-   successful `SwapHeader` so the next read rebuilds the chunker — required
-   regardless of (1) because the cached `peerSeekable` already has
-   `transitionEmitted=true` and short-circuits to `base` on every later call.
+PR [#2585](https://github.com/e2b-dev/infra/pull/2585) implemented variant
+(b): `peerSeekable` no longer caches the path at construction. `getBase`
+composes `Paths{BuildID, name}.DataFile(ct)` from the live
+`FrameTable.CompressionType()` on every call and reopens the base when `ct`
+changes (`packages/orchestrator/pkg/sandbox/template/peerclient/seekable.go:48-68`).
+After a V3→V4 swap, the next read through the cached chunker re-resolves to
+the `.zstd` path; the sticky `transitionEmitted` is not a problem because
+`getBase` runs on every subsequent call regardless. No chunker eviction in
+`File.retryOnTransition` is required.
 
 ### B2. Unbounded LZ4 header decompression (production risk)
 
@@ -92,9 +56,9 @@ size. There is also no upper bound on the compressed length itself
 
 **Where**
 
-- `packages/shared/pkg/storage/header/serialization_v4.go:127-135` —
+- `packages/shared/pkg/storage/header/serialization_v4.go:126-136` —
   `deserializeV4` skips the size prefix.
-- `packages/shared/pkg/storage/header/serialization_v4.go:245-253` —
+- `packages/shared/pkg/storage/header/serialization_v4.go:245-254` —
   `decompressLZ4` does `io.ReadAll` with no cap.
 
 **Fix.** Read the prefix in `deserializeV4`; reject sizes above a sane cap
@@ -116,8 +80,8 @@ failure surfaces to NBD as `context deadline exceeded`.
 
 **Where**
 
-- `packages/shared/pkg/storage/storage_google.go:261-272`
-- `packages/shared/pkg/storage/storage_cache_seekable_compressed.go:120-150`
+- `packages/shared/pkg/storage/storage_google.go:267-278`
+- `packages/shared/pkg/storage/storage_cache_seekable_compressed.go:120-167`
   (compressed cache writeback drain).
 
 **Fix.** Replace the absolute deadline with a per-read idle timeout, or
@@ -127,7 +91,7 @@ no-deadline + idle-timer variant is straightforward.
 
 ### B4. `Cache.WriteAtWithoutLock` panics on sub-blocksize buffers (production risk)
 
-`packages/orchestrator/pkg/sandbox/block/cache.go:344-363` does
+`packages/orchestrator/pkg/sandbox/block/cache.go:336-378` does
 `runZero := header.IsZero(b[:c.blockSize])` with no length guard; the
 function's doc comment says "caller must pass a block-aligned write" but
 there is no runtime check. `Cache.WriteAt` is the locked entry point and
@@ -147,7 +111,7 @@ eventual consistency on a freshly completed object), the failure is
 permanent because subsequent calls no longer raise
 `PeerTransitionedError` (sticky `true`).
 
-**Where**: `packages/orchestrator/pkg/sandbox/template/peerclient/seekable.go:79-89`.
+**Where**: `packages/orchestrator/pkg/sandbox/template/peerclient/seekable.go:129-138`.
 
 **Fix.** Re-emit a recoverable transition error from `peerSeekable` when
 the base read fails with `ErrObjectNotExist` and
@@ -179,7 +143,7 @@ frame, so the multi-frame V4 path is *not* validated end-to-end.
 **Where**
 
 - `tests/integration/internal/tests/api/sandboxes/sandbox_rapid_pause_resume_test.go:138-162`.
-- `packages/shared/pkg/storage/storage_google.go:553-590` and
+- `packages/shared/pkg/storage/storage_google.go:569-610` and
   `packages/shared/pkg/storage/storage_fs.go:317-340` —
   documented per-frame semantics; not a production bug.
 
@@ -209,6 +173,24 @@ hasher. Or expose a `ReadFullCompressed` helper that loops internally.
   becomes coupled to the [B6 fix](#b6-per-frame-zstd-dst-buffer-never-pooled-perf-see-optimizations)
   because pooled slices may be released before
   `retryablehttp.ReaderFunc` is replayed. Land both together.
+
+### B9. `MultipartUploader.UploadFileInParallel` leaks the multipart upload when checksum fails after a successful data upload
+
+Added by PR [#2669](https://github.com/e2b-dev/infra/pull/2669): when
+`UploadFileInParallel` runs the SHA-256 in a sibling goroutine while parts
+upload, the post-wait sequence at
+`packages/shared/pkg/storage/gcp_multipart.go:436-449` does
+`parts, err := m.uploadParts(...); ...; if hashErr := eg.Wait(); err == nil
+{ err = hashErr }; if err != nil { return ... }`. If parts succeed but
+`io.Copy(hasher, hashFile)` returns an error (disk read EIO, etc.),
+`completeUpload` is never called and the initiated multipart upload remains
+abandoned in GCS until the bucket lifecycle expires it (default 7 days). Not
+a read-path correctness issue (the final object doesn't exist) but a real
+resource leak, and noisy in incidents where many uploads share a flaky disk.
+
+**Fix.** Either (a) call `m.abortUpload` on the failure path before returning,
+or (b) treat checksum failure as best-effort once data upload succeeds and
+still call `completeUpload`, logging the checksum error. (a) is safer.
 
 ### Bugs ruled out (verified safe)
 
@@ -433,19 +415,16 @@ through `compressConfig` lets ops tune them together.
 
 ## Test plan before broad enablement
 
-- [ ] Land [B1](#b1-stale-chunker-after-v3v4-p2p-transition-rollout-gate)
-  fix + add a unit test that simulates the V3→V4 transition in a chunker
-  cached during the in-flight window (current cache layer + `peerSeekable`
-  + a fake `transitionEmitted=true` path; assert reads succeed against the
-  V4 path).
 - [ ] Land [B2](#b2-unbounded-lz4-header-decompression-production-risk),
   [B3](#b3-gcs-read-deadline-covers-the-whole-decompressor-drain-production-risk),
   [B4](#b4-cachewriteatwithoutlock-panics-on-sub-blocksize-buffers-production-risk).
 - [ ] Fix [B7](#b7-test-coverage-gap-openrangereader-returns-one-frame-test-expects-entire-file)
   so multi-frame compressed reads are actually validated end-to-end in CI.
 - [ ] Add an integration test that exercises **cross-orchestrator** P2P
-  resume during in-flight compressed upload (the path none of the
-  existing tests cover).
+  resume during in-flight compressed upload — the path B1's fix unblocks
+  but nothing yet asserts.
+- [ ] Add a unit test for the V3→V4 ct-change path in `peerSeekable.getBase`
+  to lock in the [B1](#b1-stale-chunker-after-v3v4-p2p-transition--fixed-in-main-2585) fix.
 
 ---
 
@@ -454,7 +433,11 @@ through `compressConfig` lets ops tune them together.
 - Audit transcripts (Cursor): [first audit](96f3b893-4323-4c6f-b31f-801def720ff8),
   [PR review extract](88b0756c-a591-483a-81f7-72e67f7b5cb8).
 - PRs: [#2034](https://github.com/e2b-dev/infra/pull/2034) (initial),
-  [#2532](https://github.com/e2b-dev/infra/pull/2532) (upload race fix).
+  [#2532](https://github.com/e2b-dev/infra/pull/2532) (upload race fix),
+  [#2585](https://github.com/e2b-dev/infra/pull/2585) (B1 fix: per-call path
+  resolution in `peerSeekable`),
+  [#2669](https://github.com/e2b-dev/infra/pull/2669) (V4-header-for-uncompressed
+  FF + parallel hashing in `MultipartUploader` — introduced [B9](#b9-multipartuploaderuploadfileinparallel-leaks-the-multipart-upload-when-checksum-fails-after-a-successful-data-upload)).
 - Benchmarks reproduced via:
   - `cd packages/shared && go test -run='^$' -bench=BenchmarkCompress -benchmem -benchtime=3s ./pkg/storage/`
   - `cd packages/shared && go test -run='^$' -bench='BenchmarkStoreFile/zstd' -benchmem -benchtime=2s ./pkg/storage/`
