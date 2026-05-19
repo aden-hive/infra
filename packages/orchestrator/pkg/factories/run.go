@@ -35,6 +35,7 @@ import (
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/events"
 	e2bhealthcheck "github.com/e2b-dev/infra/packages/orchestrator/pkg/healthcheck"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/hyperloopserver"
+	"github.com/e2b-dev/infra/packages/orchestrator/pkg/lifecycle"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/localupload"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/metrics"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/nfsproxy"
@@ -104,11 +105,6 @@ type Options struct {
 	Version       string
 	CommitSHA     string
 	EgressFactory EgressFactory
-}
-
-type closer struct {
-	name  string
-	close func(ctx context.Context) error
 }
 
 type serviceDoneError struct {
@@ -356,7 +352,30 @@ func run(config cfg.Config, opts Options) (success bool) {
 		})
 	}
 
-	var closers []closer
+	shutdown := lifecycle.NewManager()
+	registerUnit := func(unit lifecycle.Unit) {
+		if err := shutdown.Register(unit); err != nil {
+			logger.L().Fatal(ctx, "failed to register lifecycle unit", zap.String("unit", unit.Name), zap.Error(err))
+		}
+	}
+	registerClose := func(name string, after []string, closeFn func(context.Context) error) {
+		registerUnit(lifecycle.Unit{
+			Name:  name,
+			After: after,
+			Stop: func(closeCtx context.Context) error {
+				clog := globalLogger.With(zap.String("service", name), zap.Bool("forced", config.ForceStop))
+				clog.Info(ctx, "closing")
+
+				if err := closeFn(closeCtx); err != nil {
+					clog.Error(ctx, "error during shutdown", zap.Error(err))
+
+					return err
+				}
+
+				return nil
+			},
+		})
+	}
 
 	// The sandbox map is shared between the server and the proxy
 	// to propagate information about sandbox routing.
@@ -367,7 +386,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 	if err != nil {
 		logger.L().Fatal(ctx, "failed to create feature flags client", zap.Error(err))
 	}
-	closers = append(closers, closer{"feature flags", featureFlags.Close})
+	registerClose("feature flags", nil, featureFlags.Close)
 
 	featureFlags.SetDeploymentName(config.DomainName)
 
@@ -376,7 +395,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 	if err != nil {
 		logger.L().Fatal(ctx, "failed to create limiter", zap.Error(err))
 	}
-	closers = append(closers, closer{"limiter", limiter.Close})
+	registerClose("limiter", []string{"feature flags"}, limiter.Close)
 
 	persistence, err := storage.GetStorageProvider(ctx, storage.TemplateStorageConfig.WithLimiter(limiter))
 	if err != nil {
@@ -399,9 +418,9 @@ func run(config cfg.Config, opts Options) (success bool) {
 	if err != nil && !errors.Is(err, sharedFactories.ErrRedisDisabled) {
 		logger.L().Fatal(ctx, "Could not connect to Redis", zap.Error(err))
 	} else if err == nil {
-		closers = append(closers, closer{"redis client", func(context.Context) error {
+		registerClose("redis client", nil, func(context.Context) error {
 			return sharedFactories.CloseCleanly(redisClient)
-		}})
+		})
 	}
 
 	peerRegistry := peerclient.NopRegistry()
@@ -416,11 +435,11 @@ func run(config cfg.Config, opts Options) (success bool) {
 		logger.L().Fatal(ctx, "failed to create template cache", zap.Error(err))
 	}
 	templateCache.Start(ctx)
-	closers = append(closers, closer{"template cache", func(context.Context) error {
+	registerClose("template cache", []string{"feature flags", "limiter"}, func(context.Context) error {
 		templateCache.Stop()
 
 		return nil
-	}})
+	})
 
 	sbxEventsDeliveryTargets := make([]event.Delivery[event.SandboxEvent], 0)
 
@@ -432,9 +451,9 @@ func run(config cfg.Config, opts Options) (success bool) {
 		if err != nil {
 			logger.L().Fatal(ctx, "failed to create clickhouse driver", zap.Error(err))
 		}
-		closers = append(closers, closer{"clickhouse connection", func(context.Context) error {
+		registerClose("clickhouse connection", nil, func(context.Context) error {
 			return clickhouseConn.Close()
-		}})
+		})
 
 		sbxEventsDeliveryClickhouse, err := clickhouseevents.NewDefaultClickhouseSandboxEventsDelivery(ctx, clickhouseConn, featureFlags)
 		if err != nil {
@@ -442,7 +461,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 		}
 
 		sbxEventsDeliveryTargets = append(sbxEventsDeliveryTargets, sbxEventsDeliveryClickhouse)
-		closers = append(closers, closer{"sandbox events delivery for clickhouse", sbxEventsDeliveryClickhouse.Close})
+		registerClose("sandbox events delivery for clickhouse", []string{"clickhouse connection", "feature flags"}, sbxEventsDeliveryClickhouse.Close)
 
 		hostStatsDeliveryClickhouse, err := clickhousehoststats.NewDefaultClickhouseHostStatsDelivery(ctx, clickhouseConn, featureFlags)
 		if err != nil {
@@ -450,7 +469,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 		}
 
 		hostStatsDelivery = hostStatsDeliveryClickhouse
-		closers = append(closers, closer{"sandbox host stats delivery", hostStatsDeliveryClickhouse.Close})
+		registerClose("sandbox host stats delivery", []string{"clickhouse connection", "feature flags"}, hostStatsDeliveryClickhouse.Close)
 	}
 
 	// cgroup manager for resource accounting
@@ -469,7 +488,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 	if redisClient != nil {
 		sbxEventsDeliveryRedis := event.NewRedisStreamsDelivery[event.SandboxEvent](redisClient, event.SandboxEventsStreamName)
 		sbxEventsDeliveryTargets = append(sbxEventsDeliveryTargets, sbxEventsDeliveryRedis)
-		closers = append(closers, closer{"sandbox events delivery for redis", sbxEventsDeliveryRedis.Close})
+		registerClose("sandbox events delivery for redis", []string{"redis client"}, sbxEventsDeliveryRedis.Close)
 	}
 
 	// sandbox observer
@@ -477,7 +496,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 	if err != nil {
 		logger.L().Fatal(ctx, "failed to create sandbox observer", zap.Error(err))
 	}
-	closers = append(closers, closer{"sandbox observer", sandboxObserver.Close})
+	registerClose("sandbox observer", nil, sandboxObserver.Close)
 
 	// host metrics — samples CPU in the background so GetCPUMetrics is a
 	// non-blocking cache read on the request path.
@@ -485,7 +504,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 	startService("host metrics poller", func() error {
 		return hostMetrics.Start()
 	})
-	closers = append(closers, closer{"host metrics poller", hostMetrics.Close})
+	registerClose("host metrics poller", nil, hostMetrics.Close)
 
 	// sandbox proxy
 	sandboxProxy, err := proxy.NewSandboxProxy(tel.MeterProvider, config.ProxyPort, sandboxes, featureFlags)
@@ -500,7 +519,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 
 		return err
 	})
-	closers = append(closers, closer{"sandbox proxy", sandboxProxy.Close})
+	registerClose("sandbox proxy", []string{"feature flags"}, sandboxProxy.Close)
 
 	// egress proxy — built by the edition-specific factory
 	deps := &Deps{
@@ -525,7 +544,9 @@ func run(config cfg.Config, opts Options) (success bool) {
 		})
 	}
 	if egressSetup.Close != nil {
-		closers = append(closers, closer{"egress proxy", egressSetup.Close})
+		registerClose("egress proxy", []string{"feature flags"}, egressSetup.Close)
+	} else {
+		registerUnit(lifecycle.Unit{Name: "egress proxy", After: []string{"feature flags"}})
 	}
 
 	// device pool
@@ -538,7 +559,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 
 		return nil
 	})
-	closers = append(closers, closer{"device pool", devicePool.Close})
+	registerClose("device pool", nil, devicePool.Close)
 
 	// network pool
 	slotStorage, err := newStorage(ctx, nodeID, config.NetworkConfig, egressSetup.Proxy)
@@ -551,7 +572,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 
 		return nil
 	})
-	closers = append(closers, closer{"network pool", networkPool.Close})
+	registerClose("network pool", []string{"device pool", "egress proxy"}, networkPool.Close)
 
 	// sandbox factory
 	sandboxFactory := sandbox.NewFactory(config.BuilderConfig, networkPool, devicePool, featureFlags, hostStatsDelivery, cgroupManager, egressSetup.Proxy, sandboxes)
@@ -561,11 +582,11 @@ func run(config cfg.Config, opts Options) (success bool) {
 	volumeService := volumes.New(config, builder)
 
 	uploads := sandbox.NewUploads(templateCache, persistence, peerResolver, redisClient)
-	closers = append(closers, closer{"pending uploads", func(context.Context) error {
+	registerClose("pending uploads", []string{"template cache"}, func(context.Context) error {
 		uploads.Stop()
 
 		return nil
-	}})
+	})
 
 	orchestratorService, err := server.New(ctx, server.ServiceConfig{
 		Config:           config,
@@ -585,9 +606,9 @@ func run(config cfg.Config, opts Options) (success bool) {
 	if err != nil {
 		logger.L().Fatal(ctx, "failed to create orchestrator server", zap.Error(err))
 	}
-	closers = append(closers, closer{"orchestrator server", func(closeCtx context.Context) error {
+	registerClose("orchestrator server", []string{"network pool", "device pool", "template cache", "pending uploads", "sandbox proxy"}, func(closeCtx context.Context) error {
 		return orchestratorService.Close(closeCtx)
-	}})
+	})
 
 	// template manager sandbox logger
 	tmplSbxLoggerExternal := sbxlogger.NewLogger(
@@ -599,23 +620,29 @@ func run(config cfg.Config, opts Options) (success bool) {
 			CollectorAddress: env.LogsCollectorAddress(),
 		},
 	)
-	closers = append(closers, closer{
-		"template manager sandbox logger", func(context.Context) error {
+	registerClose(
+		"template manager sandbox logger", nil, func(context.Context) error {
 			if err := tmplSbxLoggerExternal.Sync(); err != nil && !isIgnorableSyncError(err) {
 				return err
 			}
 
 			return nil
 		},
-	})
+	)
 
 	// nfs proxy server
 	if len(config.PersistentVolumeMounts) > 0 {
-		nfsClosers, err := startNFSProxy(ctx, config, builder, startService, sandboxes)
+		nfsUnits, err := startNFSProxy(ctx, config, builder, startService, sandboxes)
 		if err != nil {
 			logger.L().Fatal(ctx, "failed to start nfs proxy", zap.Error(err))
 		}
-		closers = append(closers, nfsClosers...)
+		for _, unit := range nfsUnits {
+			if unit.Stop == nil {
+				registerUnit(unit)
+			} else {
+				registerClose(unit.Name, unit.After, unit.Stop)
+			}
+		}
 	}
 
 	// hyperloop server
@@ -631,7 +658,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 
 		return err
 	})
-	closers = append(closers, closer{"hyperloop server", hyperloopSrv.Shutdown})
+	registerClose("hyperloop server", nil, hyperloopSrv.Shutdown)
 
 	grpcServer := e2bgrpc.NewGRPCServer(tel, e2bgrpc.WithSandboxResumeMetrics())
 	orchestrator.RegisterSandboxServiceServer(grpcServer, orchestratorService)
@@ -669,7 +696,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 
 		templatemanager.RegisterTemplateServiceServer(grpcServer, tmpl)
 
-		closers = append(closers, closer{"template server", tmpl.Close})
+		registerClose("template server", []string{"orchestrator server", "network pool", "device pool", "template cache", "sandbox proxy"}, tmpl.Close)
 	}
 
 	infoService := service.NewInfoService(serviceInfo, sandboxes, hostMetrics)
@@ -698,12 +725,12 @@ func run(config cfg.Config, opts Options) (success bool) {
 
 		return err
 	})
-	closers = append(closers, closer{"cmux server", func(context.Context) error {
+	registerClose("cmux server", nil, func(context.Context) error {
 		logger.L().Info(ctx, "Shutting down cmux server")
 		cmuxServer.Close()
 
 		return nil
-	}})
+	})
 
 	pprofServer := telemetry.NewPprofServer()
 	// We handle the pprof in a separate goroutine to prevent any interaction with the main server.
@@ -714,7 +741,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 			logger.L().Error(ctx, "pprof server encountered error", zap.Error(err))
 		}
 	}()
-	closers = append(closers, closer{"pprof server", pprofServer.Shutdown})
+	registerClose("pprof server", nil, pprofServer.Shutdown)
 
 	// http server
 	healthcheck, err := e2bhealthcheck.NewHealthcheck(serviceInfo)
@@ -743,18 +770,18 @@ func run(config cfg.Config, opts Options) (success bool) {
 			return err
 		}
 	})
-	closers = append(closers, closer{"http server", httpServer.Shutdown})
+	registerClose("http server", []string{"cmux server"}, httpServer.Shutdown)
 
 	// grpc server
 	startService("grpc server", func() error {
 		return grpcServer.Serve(grpcListener)
 	})
-	closers = append(closers, closer{"grpc server", func(context.Context) error {
+	registerClose("grpc server", []string{"cmux server", "orchestrator server"}, func(context.Context) error {
 		logger.L().Info(ctx, "Shutting down grpc server")
 		grpcServer.GracefulStop()
 
 		return nil
-	}})
+	})
 
 	// Wait for the shutdown signal or if some service fails
 	select {
@@ -791,7 +818,7 @@ func run(config cfg.Config, opts Options) (success bool) {
 		}
 	}
 
-	if orchestratorService != nil {
+	registerClose("sandbox drain", []string{"orchestrator server", "network pool", "device pool"}, func(context.Context) error {
 		var drainCtx context.Context
 		var cancelDrain context.CancelFunc
 		if !config.ForceStop && config.SandboxDrainTimeout > 0 {
@@ -818,16 +845,13 @@ func run(config cfg.Config, opts Options) (success bool) {
 				success = false
 			}
 		}
-	}
 
-	slices.Reverse(closers)
-	for _, closer := range closers {
-		clog := globalLogger.With(zap.String("service", closer.name), zap.Bool("forced", config.ForceStop))
-		clog.Info(ctx, "closing")
-		if err := closer.close(closeCtx); err != nil {
-			clog.Error(ctx, "error during shutdown", zap.Error(err))
-			success = false
-		}
+		return nil
+	})
+
+	if err := shutdown.Stop(closeCtx); err != nil {
+		logger.L().Error(ctx, "error during lifecycle shutdown", zap.Error(err))
+		success = false
 	}
 
 	logger.L().Info(ctx, "Waiting for services to finish")
@@ -845,8 +869,8 @@ func startNFSProxy(
 	builder *chrooted.Builder,
 	startService func(name string, f func() error),
 	sandboxes *sandbox.Map,
-) ([]closer, error) {
-	var closers []closer
+) ([]lifecycle.Unit, error) {
+	var units []lifecycle.Unit
 
 	// portmapper listener
 	var pmConfig net.ListenConfig
@@ -861,7 +885,7 @@ func startNFSProxy(
 	startService("portmapper server", func() error {
 		return pm.Serve(ctx, pmLis)
 	})
-	closers = append(closers, closer{"portmapper server", func(_ context.Context) error { return pmLis.Close() }})
+	units = append(units, lifecycle.Unit{Name: "portmapper server", Stop: func(_ context.Context) error { return pmLis.Close() }})
 
 	// nfs proxy listener
 	var nfsConfig net.ListenConfig
@@ -885,13 +909,14 @@ func startNFSProxy(
 	startService("nfs proxy", func() error {
 		return nfsServer.Serve(lis)
 	})
-	closers = append(closers, closer{
-		"nfs proxy server", func(_ context.Context) error {
+	units = append(units, lifecycle.Unit{
+		Name: "nfs proxy server",
+		Stop: func(_ context.Context) error {
 			return lis.Close()
 		},
 	})
 
-	return closers, nil
+	return units, nil
 }
 
 func setupBuildStorage(ctx context.Context, limiter *limit.Limiter, orchConfig cfg.Config) (storage.StorageProvider, *localupload.Handler, error) {
