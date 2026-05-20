@@ -19,8 +19,6 @@ import (
 	redis_utils "github.com/e2b-dev/infra/packages/shared/pkg/redis"
 )
 
-// newTestStorage spins up a redis testcontainer and returns a fresh redis-backed
-// sandbox.Storage. The container and storage are cleaned up via t.Cleanup.
 func newTestStorage(t *testing.T) sandbox.Storage {
 	t.Helper()
 
