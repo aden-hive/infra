@@ -414,6 +414,213 @@ through `compressConfig` lets ops tune them together.
 
 ---
 
+## Reproducing the benchmarks
+
+All numbers in [Performance](#performance) were collected from this tree
+(base `00907f99c`) on an AMD Ryzen 7 8745HS (16 logical cores, no SMT
+pinning, idle desktop, governor `performance`). Run `go clean -testcache`
+before each set; the in-tree benchmarks use `b.SetBytes(uncompressedSize)`,
+so the `MB/s` column in `go test` output is uncompressed throughput.
+
+### In-tree pipeline benchmarks
+
+These produce the `Production w{1,2,4}` rows of the first table and the
+entire `BenchmarkStoreFile` table.
+
+```bash
+cd packages/shared
+go test -run='^$' -bench='^BenchmarkCompress$' -benchmem -benchtime=3s ./pkg/storage/
+go test -run='^$' -bench='^BenchmarkStoreFile$' -benchmem -benchtime=2s ./pkg/storage/
+```
+
+Mapping bench output to the doc:
+
+- `BenchmarkCompress/w{1,2,4}_unlimited` → `Production w{1,2,4}` rows
+  (218 / 421 / 745 MB/s). The throttled variants (`w*_200MBs`, `w4_100MBs`)
+  are not in the doc but are emitted by the same run.
+- `BenchmarkStoreFile/zstd{1,2,3}/w8` → corresponding rows of the
+  `BenchmarkStoreFile` table; the `ratio` extra metric (reported by
+  `b.ReportMetric`) is the `ratio` column.
+- `BenchmarkStoreFile/zstd1/w1` → 226 MB/s row.
+- `B/op` is read straight from `-benchmem`.
+
+The 256 MB (`BenchmarkCompress`) / 1 GB (`BenchmarkStoreFile`) input is
+deterministic — `generateSemiRandomData` repeats a random byte 1-16 times
+to land at ratio ≈ 0.28 at zstd level 2.
+
+### Standalone reference benchmarks
+
+The `Standalone w*` rows and the frame-size sweep table are *not* in-tree —
+they isolate the encoder cost with no pipeline / no SHA / no uploader, so
+the gap between standalone and `BenchmarkCompress/w*_unlimited` is the
+production pipeline overhead.
+
+Reproduce in a scratch module against `github.com/klauspost/compress v1.18.5`:
+
+```bash
+mkdir /tmp/zbench && cd /tmp/zbench
+go mod init zbench && go get github.com/klauspost/compress@v1.18.5
+# paste the program below as main.go
+go run . -workers=1                  # standalone w1            (247 MB/s)
+go run . -workers=2                  # standalone w2            (473 MB/s)
+go run . -workers=4                  # standalone w4 (baseline) (905 MB/s)
+go run . -workers=4 -variant=pool    # +sync.Pool encoders      (887 MB/s)
+go run . -workers=4 -variant=alloc   # +per-frame dst alloc     (866 MB/s)
+go run . -workers=4 -variant=sha     # +Pool+SHA on dispatcher  (848 MB/s)
+for kb in 512 1024 2048 4096 8192 16384; do go run . -workers=4 -frame-kb=$kb; done
+```
+
+Program (≈80 LOC, mirrors `compress_upload.go::readLoop` +
+`compress_encode.go::zstdCompressor`):
+
+```go
+package main
+
+import (
+	"crypto/sha256"
+	"flag"
+	"fmt"
+	"math/rand/v2"
+	"sync"
+	"time"
+
+	"github.com/klauspost/compress/zstd"
+)
+
+func main() {
+	workers := flag.Int("workers", 4, "frame workers")
+	frameKB := flag.Int("frame-kb", 2048, "frame size in KiB")
+	variant := flag.String("variant", "reuse", "reuse|pool|alloc|sha")
+	flag.Parse()
+
+	const total = 256 << 20
+	src := semiRandom(total)
+	frame := *frameKB << 10
+
+	mkEnc := func() *zstd.Encoder {
+		e, _ := zstd.NewWriter(nil,
+			zstd.WithEncoderLevel(zstd.SpeedDefault), // level 2
+			zstd.WithEncoderCRC(true),
+			zstd.WithWindowSize(frame),
+			zstd.WithEncoderConcurrency(1))
+		return e
+	}
+
+	pool := &sync.Pool{New: func() any { return mkEnc() }}
+	encs := make([]*zstd.Encoder, *workers)
+	for i := range encs {
+		encs[i] = mkEnc()
+	}
+	dst := make([][]byte, *workers)
+	for i := range dst {
+		dst[i] = make([]byte, 0, frame)
+	}
+
+	type job struct{ id int; data []byte }
+	jobs := make(chan job, *workers*2)
+	var wg sync.WaitGroup
+	for w := 0; w < *workers; w++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := range jobs {
+				var out []byte
+				switch *variant {
+				case "pool":
+					e := pool.Get().(*zstd.Encoder)
+					out = e.EncodeAll(j.data, dst[id][:0])
+					pool.Put(e)
+				case "alloc":
+					out = encs[id].EncodeAll(j.data, make([]byte, 0, len(j.data)))
+				default: // "reuse" and "sha" share the encoder path
+					out = encs[id].EncodeAll(j.data, dst[id][:0])
+				}
+				_ = out
+			}
+		}(w)
+	}
+
+	h := sha256.New()
+	start := time.Now()
+	for off := 0; off < total; off += frame {
+		end := off + frame
+		if end > total {
+			end = total
+		}
+		chunk := src[off:end]
+		if *variant == "sha" {
+			h.Write(chunk) // sequential SHA on dispatcher
+		}
+		jobs <- job{id: off / frame, data: chunk}
+	}
+	close(jobs)
+	wg.Wait()
+	d := time.Since(start)
+	fmt.Printf("workers=%d frame=%dKB variant=%s: %.0f MB/s (%.2fs)\n",
+		*workers, *frameKB, *variant, float64(total)/d.Seconds()/(1<<20), d.Seconds())
+}
+
+func semiRandom(n int) []byte {
+	r := rand.New(rand.NewPCG(1, 2))
+	out := make([]byte, n)
+	for i := 0; i < n; {
+		run := r.IntN(16) + 1
+		if i+run > n {
+			run = n - i
+		}
+		b := byte(r.IntN(256))
+		for j := 0; j < run; j++ {
+			out[i+j] = b
+		}
+		i += run
+	}
+	return out
+}
+```
+
+Each variant adds exactly one of the operations the production pipeline
+performs, in the same order they appear in `compress_upload.go` /
+`compress_encode.go`:
+
+- `reuse` — N encoders, dst reused per worker (lower bound).
+- `pool` — encoder fetched from `sync.Pool` per frame (matches
+  `newCompressorPool`).
+- `alloc` — dst is `make([]byte, 0, len(src))` per call (matches
+  `zstdCompressor.compress`).
+- `sha` — pool + sequential SHA-256 on the dispatch goroutine (matches
+  `readLoop`'s hashing).
+
+The scaling table at line 220 (`workers=1/4/8` for 1/4/8 GiB memfiles) is
+just `bytes / (workers × 247 MB/s)`, capped by host cores.
+
+### CPU profile (≈4.1 cores busy)
+
+```bash
+cd packages/shared
+go test -run='^$' -bench='^BenchmarkCompress$/w4_unlimited' -benchtime=10s \
+  -cpuprofile=/tmp/cpu.out ./pkg/storage/
+go tool pprof -top -cum /tmp/cpu.out
+```
+
+Cumulative percentages in the [CPU profile](#cpu-profile-benchmarkcompressw4_unlimited-1224-s-wall-5047-s-samples--41-cores-busy)
+section come straight from `-top -cum` (zstd 85.14 % cum, SHA-256 6.66 %
+flat, runtime mem ops ~10.5 % combined).
+
+### Allocation profile
+
+```bash
+cd packages/shared
+go test -run='^$' -bench='^BenchmarkCompress$/w4_unlimited' -benchtime=30s \
+  -memprofile=/tmp/mem.out ./pkg/storage/
+go tool pprof -top -sample_index=alloc_space /tmp/mem.out
+```
+
+The "25 GB total over 31 iterations" line is just `B/op × N` from the
+`-benchmem` output of the same run. Per-callsite percentages are direct
+from `pprof -top`.
+
+---
+
 ## Sources
 
 - Audit transcripts (Cursor): [first audit](96f3b893-4323-4c6f-b31f-801def720ff8),
@@ -424,9 +631,5 @@ through `compressConfig` lets ops tune them together.
   resolution in `peerSeekable`),
   [#2669](https://github.com/e2b-dev/infra/pull/2669) (V4-header-for-uncompressed
   FF + parallel hashing in `MultipartUploader` — introduced [B9](#b9-multipartuploaderuploadfileinparallel-leaks-the-multipart-upload-when-checksum-fails-after-a-successful-data-upload)).
-- Benchmarks reproduced via:
-  - `cd packages/shared && go test -run='^$' -bench=BenchmarkCompress -benchmem -benchtime=3s ./pkg/storage/`
-  - `cd packages/shared && go test -run='^$' -bench='BenchmarkStoreFile/zstd' -benchmem -benchtime=2s ./pkg/storage/`
-  - Standalone reference benchmarks in a throwaway module against
-    `github.com/klauspost/compress v1.18.5`, level 2, 2 MB frames, no
-    pipeline / no SHA / no upload simulator.
+- Benchmark methodology and exact commands: see
+  [Reproducing the benchmarks](#reproducing-the-benchmarks).
