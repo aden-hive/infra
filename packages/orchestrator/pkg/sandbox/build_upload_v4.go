@@ -94,7 +94,9 @@ func (u *Upload) uploadFramed(
 	if err := u.appendAncestorBuilds(ctx, h.Builds, srcHeader.Mapping, fileType); err != nil {
 		return err
 	}
-	h.Builds[u.buildID] = selfBuild
+	if srcPath != "" {
+		h.Builds[u.buildID] = selfBuild
+	}
 
 	if err := storeHeaderWithMetrics(ctx, u.store, u.paths.HeaderFile(string(fileType)), string(fileType), h); err != nil {
 		return fmt.Errorf("store %s header: %w", fileType, err)
