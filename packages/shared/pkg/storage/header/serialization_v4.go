@@ -3,6 +3,7 @@ package header
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"slices"
@@ -19,6 +20,11 @@ const v4SizePrefixLen = 4
 
 // v4FlagsLen is the length of the V4 flags byte. Bit 0 = IncompletePendingUpload.
 const v4FlagsLen = 1
+
+// v4MaxUncompressedHeaderSize caps LZ4 expansion of a V4 header block.
+// Real headers are KB–MB; the cap keeps a corrupt or hostile size prefix
+// from OOM-killing the orchestrator.
+const v4MaxUncompressedHeaderSize = 64 << 20
 
 // v4FlagIncomplete is bit 0 of the V4 flags byte: when set, the header
 // describes a build whose upload has not yet finalized (an in-flight diff).
@@ -130,10 +136,17 @@ func deserializeV4(metadata *Metadata, blockData []byte) (*Header, error) {
 	}
 
 	flags := blockData[0]
+	size := binary.LittleEndian.Uint32(blockData[v4FlagsLen:])
+	if size > v4MaxUncompressedHeaderSize {
+		return nil, fmt.Errorf("v4 header uncompressed size %d exceeds cap %d", size, v4MaxUncompressedHeaderSize)
+	}
 
-	decompressed, err := decompressLZ4(blockData[v4FlagsLen+v4SizePrefixLen:])
+	decompressed, err := decompressLZ4(blockData[v4FlagsLen+v4SizePrefixLen:], int(size))
 	if err != nil {
 		return nil, fmt.Errorf("failed to LZ4-decompress v4 header block: %w", err)
+	}
+	if len(decompressed) != int(size) {
+		return nil, fmt.Errorf("v4 header decompressed size %d != prefix %d", len(decompressed), size)
 	}
 
 	reader := bytes.NewReader(decompressed)
@@ -242,14 +255,17 @@ func extractRelevantRanges(mappings []BuildMap) map[uuid.UUID][]storage.Range {
 	return ranges
 }
 
-// decompressLZ4 decompresses an LZ4 frame from V4 header data.
-func decompressLZ4(src []byte) ([]byte, error) {
+// decompressLZ4 decompresses an LZ4 frame from V4 header data. The caller
+// supplies the expected uncompressed size from the on-wire size prefix;
+// reading one byte past that triggers a hard error so corrupt or hostile
+// LZ4 frames cannot drive unbounded allocation.
+func decompressLZ4(src []byte, expected int) ([]byte, error) {
 	r := lz4.NewReader(bytes.NewReader(src))
 
-	data, err := io.ReadAll(r)
-	if err != nil {
+	buf := bytes.NewBuffer(make([]byte, 0, expected))
+	if _, err := io.CopyN(buf, r, int64(expected)+1); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("lz4 decompress: %w", err)
 	}
 
-	return data, nil
+	return buf.Bytes(), nil
 }
