@@ -7,6 +7,7 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -14,6 +15,9 @@ import (
 	"github.com/e2b-dev/infra/packages/shared/pkg/logger"
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 )
+
+// postTransitionRetryWindow covers GCS post-finalize visibility lag.
+const postTransitionRetryWindow = 30 * time.Second
 
 var _ storage.Seekable = (*peerSeekable)(nil)
 
@@ -40,6 +44,7 @@ type peerSeekable struct {
 	// Either way, after the first emission we fall through to base so V3
 	// builds don't loop forever against PeerTransitionedError.
 	transitionEmitted atomic.Bool
+	transitionAt      atomic.Int64
 }
 
 // getBase returns a base Seekable opened against the storage path composed
@@ -127,6 +132,8 @@ func (s *peerSeekable) OpenRangeReader(ctx context.Context, off int64, length in
 	}
 
 	if s.uploaded != nil && s.uploaded.Load() && s.transitionEmitted.CompareAndSwap(false, true) {
+		s.transitionAt.Store(time.Now().UnixNano())
+
 		return nil, &storage.PeerTransitionedError{}
 	}
 
@@ -135,7 +142,21 @@ func (s *peerSeekable) OpenRangeReader(ctx context.Context, off int64, length in
 		return nil, err
 	}
 
-	return base.OpenRangeReader(ctx, off, length, frameTable)
+	rc, err := base.OpenRangeReader(ctx, off, length, frameTable)
+	if errors.Is(err, storage.ErrObjectNotExist) && s.withinTransitionWindow() {
+		return nil, &storage.PeerTransitionedError{}
+	}
+
+	return rc, err
+}
+
+func (s *peerSeekable) withinTransitionWindow() bool {
+	at := s.transitionAt.Load()
+	if at == 0 {
+		return false
+	}
+
+	return time.Since(time.Unix(0, at)) < postTransitionRetryWindow
 }
 
 func (s *peerSeekable) StoreFile(context.Context, string, ...storage.PutOption) (*storage.FrameTable, [32]byte, error) {
