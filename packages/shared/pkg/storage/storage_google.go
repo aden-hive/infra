@@ -38,6 +38,7 @@ import (
 
 const (
 	googleReadTimeout              = 10 * time.Second
+	googleReadIdleTimeout          = 10 * time.Second
 	googleOperationTimeout         = 5 * time.Second
 	googleBufferSize               = 4 << 20 // 4 MiB
 	googleInitialBackoff           = 10 * time.Millisecond
@@ -265,29 +266,52 @@ func (o *gcpObject) Size(ctx context.Context) (int64, error) {
 }
 
 func (o *gcpObject) openRangeReader(ctx context.Context, off, length int64) (io.ReadCloser, error) {
-	ctx, cancel := context.WithTimeout(ctx, googleReadTimeout)
+	readCtx, cancel := context.WithCancel(ctx)
 
-	reader, err := o.handle.NewRangeReader(ctx, off, length)
+	// Bound the initial NewRangeReader call only; the per-Read idle timer
+	// installed below caps stalls during the actual drain so a slow
+	// consumer (UFFD back-pressure, decompressor pull, cache writeback)
+	// cannot starve the absolute deadline.
+	openTimer := time.AfterFunc(googleReadTimeout, cancel)
+	reader, err := o.handle.NewRangeReader(readCtx, off, length)
+	openTimer.Stop()
 	if err != nil {
 		cancel()
 
 		return nil, fmt.Errorf("failed to create GCS range reader for %q at %d+%d: %w", o.path, off, length, err)
 	}
 
-	return &cancelOnCloseReader{ReadCloser: reader, cancel: cancel}, nil
+	return &idleTimeoutReader{ReadCloser: reader, cancel: cancel, idle: googleReadIdleTimeout}, nil
 }
 
-// cancelOnCloseReader wraps a ReadCloser and calls a CancelFunc on Close,
-// ensuring the context used to create the reader is cleaned up.
-type cancelOnCloseReader struct {
+// idleTimeoutReader cancels the underlying GCS stream context if no Read
+// completes within `idle`. Each successful Read resets the timer.
+type idleTimeoutReader struct {
 	io.ReadCloser
 
 	cancel context.CancelFunc
+	idle   time.Duration
+	timer  *time.Timer
 }
 
-func (r *cancelOnCloseReader) Close() error {
-	defer r.cancel()
+func (r *idleTimeoutReader) Read(p []byte) (int, error) {
+	if r.timer == nil {
+		r.timer = time.AfterFunc(r.idle, r.cancel)
+	} else {
+		r.timer.Reset(r.idle)
+	}
+	n, err := r.ReadCloser.Read(p)
+	if err != nil {
+		r.timer.Stop()
+	}
+	return n, err
+}
 
+func (r *idleTimeoutReader) Close() error {
+	if r.timer != nil {
+		r.timer.Stop()
+	}
+	defer r.cancel()
 	return r.ReadCloser.Close()
 }
 
