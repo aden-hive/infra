@@ -34,17 +34,29 @@ func (c *cachedSeekable) openReaderCompressed(ctx context.Context, offsetU int64
 
 	switch {
 	case err == nil:
-		recordCacheRead(ctx, true, int64(r.Length), cacheTypeSeekable, cacheOpOpenRangeReader)
-		timer.Success(ctx, int64(r.Length))
-
-		decompressed, err := newDecompressingReadCloser(f, frameTable.CompressionType())
-		if err != nil {
+		fi, statErr := f.Stat()
+		switch {
+		case statErr != nil:
 			f.Close()
+			recordCacheReadError(ctx, cacheTypeSeekable, cacheOpOpenRangeReader, statErr)
+		case fi.Size() != int64(r.Length):
+			f.Close()
+			_ = os.Remove(path)
+			recordCacheReadError(ctx, cacheTypeSeekable, cacheOpOpenRangeReader,
+				fmt.Errorf("cached frame %s size %d != expected %d", path, fi.Size(), r.Length))
+		default:
+			recordCacheRead(ctx, true, int64(r.Length), cacheTypeSeekable, cacheOpOpenRangeReader)
+			timer.Success(ctx, int64(r.Length))
 
-			return nil, fmt.Errorf("decompress cached frame: %w", err)
+			decompressed, err := newDecompressingReadCloser(f, frameTable.CompressionType())
+			if err != nil {
+				f.Close()
+
+				return nil, fmt.Errorf("decompress cached frame: %w", err)
+			}
+
+			return withNFSGauge(ctx, decompressed), nil
 		}
-
-		return withNFSGauge(ctx, decompressed), nil
 	case !os.IsNotExist(err):
 		recordCacheReadError(ctx, cacheTypeSeekable, cacheOpOpenRangeReader, err)
 	}
