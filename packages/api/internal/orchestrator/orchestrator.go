@@ -155,7 +155,7 @@ func New(
 
 	o.sandboxStore = sandbox.NewStore(
 		redisStorage,
-		redisreservations.NewReservationStorage(redisClient),
+		redisreservations.NewReservationStorage(redisClient, redisStorage.Notifier()),
 		sandbox.Callbacks{
 			AddSandboxToRoutingTable: o.addSandboxToRoutingTable,
 			AsyncNewlyCreatedSandbox: o.handleNewlyCreatedSandbox,
