@@ -303,6 +303,8 @@ func (r *idleTimeoutReader) Read(p []byte) (int, error) {
 	n, err := r.ReadCloser.Read(p)
 	if err != nil {
 		r.timer.Stop()
+	} else {
+		r.timer.Reset(r.idle)
 	}
 	return n, err
 }
