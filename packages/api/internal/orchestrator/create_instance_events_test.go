@@ -57,13 +57,14 @@ func newOrchestratorWithCounter(t *testing.T) (*Orchestrator, *eventCounter) {
 	ec := &eventCounter{}
 
 	client := redis_utils.SetupInstance(t)
-	storage := sandboxredis.NewStorage(client)
+	storage, err := sandboxredis.NewStorage(client, noop.NewMeterProvider())
+	require.NoError(t, err)
 	go storage.Start(t.Context())
-	t.Cleanup(storage.Close)
+	t.Cleanup(func() { storage.Close(context.WithoutCancel(t.Context())) })
 
 	store := sandbox.NewStore(
 		storage,
-		redisreservations.NewReservationStorage(client),
+		redisreservations.NewReservationStorage(client, storage.Notifier()),
 		sandbox.Callbacks{
 			AddSandboxToRoutingTable: func(context.Context, sandbox.Sandbox) {},
 			AsyncNewlyCreatedSandbox: ec.callback(),

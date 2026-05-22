@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/metric/noop"
 
 	"github.com/e2b-dev/infra/packages/api/internal/orchestrator/nodemanager"
 	"github.com/e2b-dev/infra/packages/api/internal/sandbox"
@@ -22,14 +23,15 @@ func newTestAutoResumeOrchestrator(t *testing.T) *Orchestrator {
 	t.Helper()
 
 	client := redis_utils.SetupInstance(t)
-	storage := sandboxredis.NewStorage(client)
+	storage, err := sandboxredis.NewStorage(client, noop.NewMeterProvider())
+	require.NoError(t, err)
 	go storage.Start(t.Context())
-	t.Cleanup(storage.Close)
+	t.Cleanup(func() { storage.Close(context.WithoutCancel(t.Context())) })
 
 	return &Orchestrator{
 		sandboxStore: sandbox.NewStore(
 			storage,
-			redisreservations.NewReservationStorage(client),
+			redisreservations.NewReservationStorage(client, storage.Notifier()),
 			sandbox.Callbacks{
 				AddSandboxToRoutingTable: func(context.Context, sandbox.Sandbox) {},
 				AsyncNewlyCreatedSandbox: func(context.Context, sandbox.Sandbox, sandbox.CreationMetadata) {},

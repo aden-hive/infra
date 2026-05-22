@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/metric/noop"
 
 	"github.com/e2b-dev/infra/packages/api/internal/sandbox"
 	sandboxredis "github.com/e2b-dev/infra/packages/api/internal/sandbox/storage/redis"
@@ -23,9 +24,10 @@ func newTestStorage(t *testing.T) sandbox.Storage {
 	t.Helper()
 
 	client := redis_utils.SetupInstance(t)
-	storage := sandboxredis.NewStorage(client)
+	storage, err := sandboxredis.NewStorage(client, noop.NewMeterProvider())
+	require.NoError(t, err)
 	go storage.Start(t.Context())
-	t.Cleanup(storage.Close)
+	t.Cleanup(func() { storage.Close(context.WithoutCancel(t.Context())) })
 
 	return storage
 }
