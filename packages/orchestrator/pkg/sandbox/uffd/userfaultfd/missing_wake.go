@@ -28,8 +28,20 @@ func (u *Userfaultfd) faultPageViaMemfdWake(
 	source PageReader,
 	memfd *block.Memfd,
 	onFailure func() error,
-) (faultOutcome, error) {
+) (outcome faultOutcome, err error) {
 	span := trace.SpanFromContext(ctx)
+
+	// Named returns so a recovered panic produces a fatal error: the bare
+	// zero values would otherwise look like a successful install
+	// (faultInstalled) and a deterministic panic would loop forever.
+	defer func() {
+		if r := recover(); r != nil {
+			u.logger.Error(ctx, "UFFD memfd-wake panic", zap.Any("pagesize", u.pageSize), zap.Any("panic", r))
+			outcome = faultDiscarded
+			err = fmt.Errorf("uffd memfd-wake panic: %v", r)
+		}
+	}()
+
 	pageSize := int64(u.pageSize)
 	offset &^= pageSize - 1
 
