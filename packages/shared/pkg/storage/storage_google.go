@@ -274,6 +274,10 @@ func (o *gcpObject) openRangeReader(ctx context.Context, off, length int64) (io.
 	if err != nil {
 		cancel()
 
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			return nil, fmt.Errorf("failed to create GCS range reader for %q at %d+%d: %w", o.path, off, length, ErrObjectNotExist)
+		}
+
 		return nil, fmt.Errorf("failed to create GCS range reader for %q at %d+%d: %w", o.path, off, length, err)
 	}
 
