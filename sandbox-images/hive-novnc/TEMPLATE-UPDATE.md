@@ -36,8 +36,14 @@ hive-backend (GKE)           │ OVH bare-metal (135.148.52.236) │
                              │  local docker registry (:5000)  │
                              │   └─ hive-novnc:colonies-vN     │
                              │                                 │
-                             │  /orchestrator/build-cache/     │
-                             │   templates/<build-id>/         │
+                             │  template snapshots             │
+                             │   STORAGE_PROVIDER=AWSBucket    │
+                             │     → minio at :9000            │
+                             │     /srv/minio/e2b-templates/   │
+                             │       <build-id>/               │
+                             │   STORAGE_PROVIDER=Local        │
+                             │     → /orchestrator/build-cache/│
+                             │       templates/<build-id>/     │
                              │     ├─ rootfs.ext4              │
                              │     ├─ memfile                  │
                              │     └─ snapfile                 │
@@ -60,18 +66,49 @@ A template roll produces three artefacts that all need to agree:
 
 1. **Docker image** — `127.0.0.1:5000/hive-novnc:colonies-vN`. This is what
    `create-build` boots inside Firecracker to capture the snapshot.
-2. **Firecracker snapshot** — `rootfs.ext4` + `memfile` + `snapfile` under
-   `/orchestrator/build-cache/templates/<build-id>/`. The orchestrator
-   restores from these files when spawning a sandbox.
+2. **Firecracker snapshot** — `rootfs.ext4` + `memfile` + `snapfile` plus
+   their headers + `metadata.json`. The location depends on the
+   orchestrator's `STORAGE_PROVIDER`:
+   - `AWSBucket` (current OVH staging) → MinIO at
+     `/srv/minio/${TEMPLATE_BUCKET_NAME}/<build-id>/`.
+   - `Local` (legacy / dev) →
+     `${LOCAL_TEMPLATE_STORAGE_BASE_PATH}/<build-id>/`.
+
+   `roll-template.sh` reads `/proc/<orchestrator-pid>/environ` to
+   discover whichever provider is live and passes the same env to
+   `create-build`. Hardcoding the wrong provider was the 2026-04-29
+   outage — the build wrote to the local path but the orchestrator
+   only looks at MinIO; every spawn returned `FailedPrecondition:
+   sandbox files not found`.
 3. **Postgres registration** — rows in `env_builds` and
    `env_build_assignments` that map the alias (`hivev3`) to the new
    `<build-id>`. Without this, the API still resolves the alias to the
-   *previous* build and `create-build`'s snapshot sits unused on disk.
+   *previous* build and `create-build`'s snapshot sits unused.
 
-A "roll" is atomic only when all three land. The script does them in
-order; if it fails partway you get a half-rolled state described below.
+A "roll" is atomic only when all three land. `roll-template.sh` verifies
+artifact #2 is in the storage backend before performing #3, so a busted
+build leaves the previous good build live.
 
-## The seven steps, and what's footgunned about each
+## The nine steps, and what's footgunned about each
+
+### 0. Refresh `hive-src/` from `hive-desktop-runtime`
+
+The desktop AppImage and the VM template MUST run the same hive-runtime
+code. The AppImage's bundle is rsynced from `~/aden/hive-desktop-runtime`
+at packaging time by [`hive-desktop/vendor/sync-hive.sh`](../../../hive-desktop/vendor/sync-hive.sh).
+Until 2026-05-06, the VM's `hive-src/` was an arbitrary local checkout
+on whichever developer ran the script — they drifted by ~100 commits in
+the wild.
+
+[`sync-hive-src.sh`](sync-hive-src.sh) pulls from the same source as the
+AppImage with the same exclusion list, then stamps `.hive-source-rev` +
+`.hive-source-branch`. `roll-template.sh` calls it automatically (skip
+with `--skip-runtime-sync`). To verify both deployments agree:
+
+```bash
+diff <(cat ~/aden/hive-desktop/vendor/hive/.hive-source-rev) \
+     <(ssh ubuntu@135.148.52.236 cat /home/ubuntu/infra/sandbox-images/hive-novnc/hive-src/.hive-source-rev)
+```
 
 ### 1. `rsync sandbox-images/hive-novnc/` → orchestrator host
 
@@ -80,8 +117,8 @@ The orchestrator host has its own checkout of the infra repo at
 docker build until they're rsynced.
 
 `hive-src/` is `.gitignore`d in this repo (it's a build-time snapshot of
-upstream OSS hive), so rsync is the *only* path. Forgetting this step
-gives you a docker image with stale Python source.
+the closed-source desktop-runtime fork), so rsync is the *only* path.
+Forgetting this step gives you a docker image with stale Python source.
 
 ### 2. `docker build` + push to local registry on `:5000`
 
@@ -129,43 +166,75 @@ silently launch a build that's destined to fail.
 - waits for the VM's systemd target ("ready"),
 - snapshots memory + state.
 
-Required env vars (none documented; scraped from the orchestrator's
-systemd unit):
+**Env: read from the running orchestrator process, never hardcoded.**
+The orchestrator's nomad job sets ~20 env vars that `create-build`
+needs. These vary by deployment (single-node OVH PoC vs production e2b
+on GCP), so `roll-template.sh` reads them out of
+`/proc/<orch-pid>/environ` and re-exports them into `create-build`'s
+shell. Whatever the orchestrator runs with becomes what `create-build`
+runs with — drift is impossible.
 
-| Var | Value | Why |
-|---|---|---|
-| `STORAGE_PROVIDER=Local` | required | Default is GCS; without this it asks for `TEMPLATE_BUCKET_NAME` and panics. |
-| `LOCAL_TEMPLATE_STORAGE_BASE_PATH=/orchestrator/build-cache/templates` | | Where the snapshot lands. |
-| `LOCAL_BUILD_CACHE_STORAGE_BASE_PATH=/orchestrator/build-cache` | | Layer cache dir. |
-| `USE_LOCAL_NAMESPACE_STORAGE=true` | | Keeps multi-tenant namespacing local instead of S3-style. |
-| `ENVIRONMENT=local` | | Skips a few cloud-only init paths. |
-| `DOCKERHUB_REMOTE_REPOSITORY_PROVIDER=Local` | | Bypasses the dockerhub→harbor pull-secret path. |
-| `HOST_BUSYBOX_DIR=/fc-busybox` | | Init binary for the rootfs. |
-| `HOST_KERNELS_DIR=/fc-kernels` | | Where vmlinux lives on the host. |
-| `FIRECRACKER_VERSIONS_DIR=/fc-versions` | | Firecracker binaries. |
-| `HOST_ENVD_PATH=/fc-envd/envd` | | The in-VM agent binary that gets baked in. |
+Keys captured (see [`roll-template.sh:snapshot_orchestrator_env`](roll-template.sh#L60)):
+
+```
+STORAGE_PROVIDER  TEMPLATE_BUCKET_NAME  BUILD_CACHE_BUCKET_NAME
+AWS_ENDPOINT_URL_S3  AWS_REGION  AWS_S3_USE_PATH_STYLE
+AWS_ACCESS_KEY_ID  AWS_SECRET_ACCESS_KEY
+ARTIFACTS_REGISTRY_PROVIDER
+DOCKERHUB_REMOTE_REPOSITORY_PROVIDER  DOCKERHUB_REMOTE_REPOSITORY_URL
+REGISTRY_DOCKER_REPOSITORY_NAME
+HOST_BUSYBOX_DIR  HOST_KERNELS_DIR  FIRECRACKER_VERSIONS_DIR  HOST_ENVD_PATH
+ENVIRONMENT  USE_LOCAL_NAMESPACE_STORAGE
+LOCAL_TEMPLATE_STORAGE_BASE_PATH  LOCAL_BUILD_CACHE_STORAGE_BASE_PATH
+NODE_IP
+```
 
 Required flags:
 
 ```
 -template <alias>        e.g. hivev3
--to-build <new-uuid>     fresh UUID; the snapshot lands at
-                         /orchestrator/build-cache/templates/<uuid>/
+-to-build <new-uuid>     fresh UUID
 -fromImage <registry>    127.0.0.1:5000/hive-novnc:<tag>
 -vcpu 2 -memory 2560 -disk 6144 -hugepages=false
--storage /orchestrator/build-cache
 ```
+
+(`-storage` is no longer passed — the storage backend comes from the
+env vars above.)
 
 The build VM runs through full systemd boot (chrony, ssh, supervisord)
 inside Firecracker. Total elapsed: ~30–60s on a warm cache.
 
+### 4b. Verify the snapshot landed where the orchestrator will look
+
+`create-build` writes the snapshot to whatever
+`STORAGE_PROVIDER` points at. After the build returns, the script
+probes the destination for all six expected files
+(`memfile`, `memfile.header`, `metadata.json`, `rootfs.ext4`,
+`rootfs.ext4.header`, `snapfile`).
+
+| Provider | Probe |
+|---|---|
+| `AWSBucket` | `sudo test -e /srv/minio/${TEMPLATE_BUCKET_NAME}/<build-id>/<file>` |
+| `Local` | `sudo test -f ${LOCAL_TEMPLATE_STORAGE_BASE_PATH}/<build-id>/<file>` |
+
+Hard fails if any are missing — the postgres INSERT in step 6 is
+skipped, the alias stays on the prior good build, and the broken
+build's files (if any) stay on disk for forensics. This is the
+guard that would have caught the 2026-04-29 outage.
+
 ### 5. Restart nomad
 
 `systemctl start nomad`. Nomad re-launches the orchestrator alloc and
-the api-server alloc within ~10 seconds. The script polls `:5007` until
-the orchestrator is back, then proceeds. Existing sandboxes from before
-the restart re-attach automatically (their snapshots are on disk and the
-sandbox-catalog rows survive in redis).
+the api-server alloc within ~10 seconds. The script polls until BOTH
+`:5007` (orchestrator) AND `:3000` (api server) are bound — the prior
+version returned as soon as `:5007` came up, even when the api alloc
+was still crash-looping (e.g. 2026-05-06 saw `bind: address already in
+use` on `:5015` keep the api crashing for ~5 minutes after the
+orchestrator was healthy).
+
+Existing sandboxes from before the restart re-attach automatically
+(their snapshots are on disk and the sandbox-catalog rows survive in
+redis).
 
 ### 6. **`INSERT INTO env_builds + env_build_assignments`** ← the load-bearing step
 
@@ -188,7 +257,9 @@ INSERT INTO env_builds (
   '<new-build-id>', NOW(), NOW(), NOW(),
   'uploaded', 2, 2560, 4096, 6144,
   'vmlinux-6.1.158', 'v1.12.1_210cbac', '<env-id>', '0.1.0',
-  '{}'::jsonb, 'ready', '<team-id>'
+  '{"source_rev":"…","source_branch":"…","image_tag":"colonies-vN",
+    "rolled_at":"<utc-iso>"}'::jsonb,
+  'ready', '<team-id>'
 );
 
 -- env_build_assignments: the *active* build for an alias
@@ -203,6 +274,16 @@ VALUES ('<env-id>', '<new-build-id>', 'default', 'app');
 The e2b API returns the `(env_id, tag='default')` row with the latest
 `created_at` from `env_build_assignments` as the alias's active build.
 Inserting a fresh row flips the alias.
+
+The `reason` column carries forensic metadata so a later "which commit
+was that build from?" question is a one-line postgres query:
+
+```sql
+SELECT id, reason->>'source_rev', reason->>'image_tag', created_at
+FROM env_builds
+WHERE env_id='jiqznoghg92g68fhgtdh'
+ORDER BY created_at DESC LIMIT 5;
+```
 
 Postgres password is auto-discovered from the api-server's process env
 (`POSTGRES_CONNECTION_STRING`). The script bails if it can't find it.
@@ -226,10 +307,35 @@ either way).
 
 | Symptom | What likely failed | Fix |
 |---|---|---|
-| `docker push` succeeded, `create-build` 502 | step 3 — `:5007` was still bound. | Confirm with `ssh <orch> sudo ss -tlnp \| grep :5007`. Re-run; the script idempotently re-uses the pushed image. |
+| `docker push` succeeded, `create-build` 502 | step 3 — `:5007` was still bound. | `./roll-template.sh check -a <alias>` to confirm. Re-run; the script idempotently re-uses the pushed image. |
+| Spawn returns `FailedPrecondition: sandbox files for 'X' not found` | snapshot in wrong storage backend (was 2026-04-29 outage). | `./roll-template.sh check` reports the missing files. Was caused by env-var hardcoding before 2026-05-06 — should not recur. To recover: `INSERT env_build_assignments` with the previous `build_id` to roll back, then re-run `./roll-template.sh`. |
 | `create-build` finished, but new sandboxes still spawn old code | step 6 was skipped. | `psql … "SELECT build_id FROM env_build_assignments WHERE env_id=… ORDER BY created_at DESC LIMIT 1"` — if it's the old one, run the two INSERTs by hand or rerun the script. |
-| api server 500s after roll | nomad didn't restart it cleanly. | `sudo systemctl restart nomad`, then `pgrep -af 'bin/api'` to confirm it's back. |
+| api server crash-looping with `bind: address already in use` after roll | step 5 — a stale alloc still holds the port. | Wait for the new poll loop in `start_orchestrator()` (60s); if it times out, `sudo pkill -KILL -f bin/api` and let nomad re-place. |
 | New sandbox boots but `hive serve` 500s | image regression. Look at `/api/sessions` against the new sandbox via the orchestrator's host-header trick. | Roll back: `INSERT … env_build_assignments` with the previous `build_id` (any prior row from the same env_id) → fresh sandboxes flip back. The bad build's snapshot stays on disk for forensics. |
+| Drift between AppImage and VM template | step 0 was skipped or `$HIVE_SRC` differed. | `diff <(cat ~/aden/hive-desktop/vendor/hive/.hive-source-rev) <(ssh ubuntu@$ORCH cat /home/ubuntu/infra/sandbox-images/hive-novnc/hive-src/.hive-source-rev)` — should be identical. If not, re-run `bash sync-hive-src.sh` + `npm run package` + `roll-template.sh` in coordinated order. |
+
+## Parity testing local ↔ remote
+
+After a roll, the bar isn't "the orchestrator can spawn a sandbox" — it's
+"a colony from a desktop user behaves equivalently against the VM
+template as it does against the local hive-runtime." [`parity-test.sh`](parity-test.sh)
+exercises that directly:
+
+```bash
+./parity-test.sh --colony parity_smoke
+```
+
+The script (a) starts a fresh local `hive serve`, (b) spawns a fresh e2b
+sandbox via the API, (c) pushes the same colony to both via
+`POST /api/colonies/import`, (d) sends the same prompt, then (e)
+compares `queen_phase`, `queen_id`, `agent_path`, the colony's skills
+catalog, the first tool call from `events/history`, and the
+`/api/config/llm` shape. Pass means every dimension matches modulo path
+prefixes; fail dumps a JSON diff under `/tmp/parity-<run-id>/report.json`.
+
+Use it before and after every roll: catches LLM auth regressions,
+HIVE_HOME-aware-but-not-quite path bugs, and storage-backend
+inconsistencies that the orchestrator's `/templates` endpoint can't see.
 
 ## Direct VM debugging (orchestrator-side, no access_token)
 

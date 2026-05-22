@@ -1,0 +1,7 @@
+{
+  "session_id": "session_smoke",
+  "queen_id": "queen_smoke",
+  "agent_path": "parity_smoke",
+  "created_at": "2026-05-06T00:00:00+00:00",
+  "description": "Stub queen session for parity-smoke — exists so the desktop's pushColonyToWorkspace finds the agents/queens/queen_smoke/sessions/session_smoke/ tree referenced by metadata.json:queen_session_id."
+}

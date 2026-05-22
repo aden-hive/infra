@@ -1,27 +1,43 @@
 #!/usr/bin/env bash
 # Roll a new build of the hive-novnc Firecracker template end-to-end.
 #
-#   ./roll-template.sh                        # bumps colonies-vN by reading registry, builds, registers
-#   ./roll-template.sh -t my-tag              # use an explicit registry tag
-#   ./roll-template.sh -a hivev4              # also register a different alias (creates env if missing)
-#   ./roll-template.sh --skip-sync            # skip rsync of local hive-src to orchestrator (build-only)
+#   ./roll-template.sh                       # bumps colonies-vN, builds, registers
+#   ./roll-template.sh -t my-tag             # use an explicit registry tag
+#   ./roll-template.sh -a hivev4             # also register a different alias
+#   ./roll-template.sh --skip-sync           # skip the local→orchestrator rsync
+#   ./roll-template.sh --skip-runtime-sync   # skip refreshing hive-src/ from the fork
+#   ./roll-template.sh check                 # run env-snapshot + storage probe against
+#                                              the *current* alias (no roll)
 #
 # What it does, idempotently, in order:
+#   0. sync hive-src/ from $HOME/aden/hive-desktop-runtime (via sync-hive-src.sh)
 #   1. rsync sandbox-images/hive-novnc/ from this checkout → orchestrator host
-#   2. docker build + push to local registry as <ALIAS>:<TAG>  (via ssh)
-#   3. stop nomad-managed orchestrator long enough to free port 5007
-#   4. orchestrator/bin/create-build → Firecracker rootfs+memfile snapshot
-#   5. restart nomad → orchestrator
-#   6. INSERT into postgres env_builds + env_build_assignments → new build active
-#   7. probe e2b API to confirm alias→buildID has flipped
+#   2. docker build + push to local registry as hive-novnc:<TAG>
+#   3. snapshot the *running* orchestrator's env vars (storage / registry / paths)
+#   4. stop nomad-managed orchestrator + api long enough to free port 5007
+#   5. orchestrator/bin/create-build with the orchestrator's exact env →
+#      Firecracker rootfs+memfile snapshot (lands in MinIO when STORAGE_PROVIDER=AWSBucket)
+#   6. probe the snapshot's storage destination — every expected file present?
+#   7. restart nomad → wait for both orchestrator (:5007) and api (:3000)
+#   8. INSERT into postgres env_builds + env_build_assignments → new build active
+#      (with source_rev / image_tag stamped into env_builds.reason for forensics)
+#   9. probe e2b API to confirm alias→buildID has flipped
 #
-# Why a script: every step has a footgun (port-5007 conflict with nomad
-# respawn, build-cache env vars, postgres alias mapping). Running them
-# one-by-one from a shell drifts every time.
+# Footguns this script handles for you:
+#   - cmd/create-build/main.go:51 hardcodes proxyPort=5007. Nomad respawns the
+#     orchestrator on any kill; we stop the agent itself + force-kill executors.
+#   - create-build does NOT register the build with the e2b API. Postgres
+#     `env_build_assignments` is what the alias resolution reads.
+#   - The orchestrator runs with STORAGE_PROVIDER=AWSBucket+minio in production;
+#     the prior version of this script hardcoded STORAGE_PROVIDER=Local and
+#     wrote snapshots to a path the orchestrator never looks at — silent
+#     half-roll. Now we read the env from the live orchestrator process.
+#   - We verify the snapshot exists in the storage backend BEFORE flipping the
+#     alias, so a busted build leaves the previous good build live.
 #
 # Requires:
 #   - SSH access to $ORCH_HOST as $ORCH_USER (default: ubuntu@135.148.52.236)
-#   - psql + redis-cli on the orchestrator
+#   - psql + redis-cli + mc on the orchestrator
 #   - The e2b API at https://api.vm.open-hive.com (read-only, just for verify)
 
 set -euo pipefail
@@ -32,18 +48,179 @@ ORCH="${ORCH_USER}@${ORCH_HOST}"
 ALIAS="${HIVE_TEMPLATE_ALIAS:-hivev3}"
 TAG=""
 SKIP_SYNC=0
+SKIP_RUNTIME_SYNC=0
+SUBCOMMAND="roll"
 
+# ── arg parse ─────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -t|--tag) TAG="$2"; shift 2 ;;
     -a|--alias) ALIAS="$2"; shift 2 ;;
     --skip-sync) SKIP_SYNC=1; shift ;;
+    --skip-runtime-sync) SKIP_RUNTIME_SYNC=1; shift ;;
+    check) SUBCOMMAND="check"; shift ;;
     -h|--help) sed -n '1,/^$/p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
 
-# ── 0. resolve registry tag ───────────────────────────────────────────
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ── shared helpers ────────────────────────────────────────────────────
+
+# Snapshot the running orchestrator's env vars over SSH. Returns the keys
+# create-build cares about as `KEY=VALUE` lines on stdout, suitable for
+# wrapping into `env $(...)` further down. If no orchestrator is running,
+# returns nothing (caller handles).
+snapshot_orchestrator_env() {
+  ssh "$ORCH" '
+    PID=$(pgrep -f "bin/orchestrator" | head -1)
+    [[ -z "$PID" ]] && exit 0
+    sudo cat /proc/$PID/environ 2>/dev/null | tr "\0" "\n" | grep -E "^(STORAGE_PROVIDER|TEMPLATE_BUCKET_NAME|BUILD_CACHE_BUCKET_NAME|AWS_ENDPOINT_URL_S3|AWS_REGION|AWS_S3_USE_PATH_STYLE|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|ARTIFACTS_REGISTRY_PROVIDER|DOCKERHUB_REMOTE_REPOSITORY_PROVIDER|DOCKERHUB_REMOTE_REPOSITORY_URL|REGISTRY_DOCKER_REPOSITORY_NAME|HOST_BUSYBOX_DIR|HOST_KERNELS_DIR|FIRECRACKER_VERSIONS_DIR|HOST_ENVD_PATH|ENVIRONMENT|USE_LOCAL_NAMESPACE_STORAGE|LOCAL_TEMPLATE_STORAGE_BASE_PATH|LOCAL_BUILD_CACHE_STORAGE_BASE_PATH|NODE_IP)="
+  '
+}
+
+# Probe the storage backend for a specific build_id. Returns 0 if all six
+# expected files exist (memfile, memfile.header, metadata.json, rootfs.ext4,
+# rootfs.ext4.header, snapfile), 1 otherwise. Branches on STORAGE_PROVIDER.
+verify_snapshot_in_storage() {
+  local build_id="$1"
+  local env_blob="$2"
+  local provider bucket local_path
+  provider=$(echo "$env_blob" | grep '^STORAGE_PROVIDER=' | head -1 | cut -d= -f2-)
+  bucket=$(echo "$env_blob" | grep '^TEMPLATE_BUCKET_NAME=' | head -1 | cut -d= -f2-)
+  local_path=$(echo "$env_blob" | grep '^LOCAL_TEMPLATE_STORAGE_BASE_PATH=' | head -1 | cut -d= -f2-)
+
+  case "$provider" in
+    AWSBucket)
+      # MinIO: file-listing under /srv/minio/<bucket>/<build-id>/.
+      # mc is also on the host but `ls` over SSH is simpler and faster.
+      ssh "$ORCH" "
+        for f in memfile memfile.header metadata.json rootfs.ext4 rootfs.ext4.header snapfile; do
+          if ! sudo test -e /srv/minio/${bucket}/${build_id}/\$f; then
+            echo \"  missing: /srv/minio/${bucket}/${build_id}/\$f\"
+            exit 1
+          fi
+        done
+      "
+      ;;
+    Local)
+      ssh "$ORCH" "
+        for f in memfile memfile.header metadata.json rootfs.ext4 rootfs.ext4.header snapfile; do
+          if ! sudo test -f ${local_path}/${build_id}/\$f; then
+            echo \"  missing: ${local_path}/${build_id}/\$f\"
+            exit 1
+          fi
+        done
+      "
+      ;;
+    *)
+      echo "  unknown STORAGE_PROVIDER='$provider' — can't verify; refusing to flip" >&2
+      return 1
+      ;;
+  esac
+}
+
+# Stop nomad + force-kill orchestrator/api allocs and wait for :5007 to free.
+# Hard fails after 60s if the port is still bound.
+stop_orchestrator() {
+  ssh "$ORCH" '
+    sudo systemctl stop nomad
+    sleep 2
+    sudo pkill -KILL -f "nomad executor" 2>/dev/null || true
+    sudo pkill -KILL -f "bin/orchestrator" 2>/dev/null || true
+    sudo pkill -KILL -f "bin/api" 2>/dev/null || true
+    for i in $(seq 1 30); do
+      sleep 2
+      if ! sudo ss -tlnp 2>/dev/null | grep -q ":5007 "; then
+        echo "  :5007 free after ${i} polls"
+        exit 0
+      fi
+    done
+    echo "!! :5007 still bound after 60s; refusing to continue" >&2
+    sudo ss -tlnp | grep ":5007 " >&2
+    exit 1
+  '
+}
+
+# Restart nomad and poll until BOTH :5007 (orchestrator) and :3000 (api) are
+# bound. The previous version of this script returned as soon as :5007 came
+# back, even when api was still crash-looping.
+start_orchestrator() {
+  ssh "$ORCH" '
+    sudo systemctl start nomad
+    for i in $(seq 1 30); do
+      sleep 2
+      orch=$(sudo ss -tlnp 2>/dev/null | grep -E "orchestrator.*:5007 " | head -1)
+      api=$(sudo ss -tlnp 2>/dev/null | grep -E "api.*:3000 " | head -1)
+      if [[ -n "$orch" && -n "$api" ]]; then
+        echo "  orchestrator+api back after ${i} polls"
+        exit 0
+      fi
+    done
+    echo "!! orchestrator (:5007) or api (:3000) not back after 60s" >&2
+    sudo ss -tlnp 2>/dev/null | grep -E ":(5007|3000) " >&2
+    exit 1
+  '
+}
+
+# ── check subcommand ──────────────────────────────────────────────────
+# Run env-snapshot + storage probe against the *currently active* build for
+# the alias. Useful when triaging "spawns are failing" before re-rolling.
+if [[ "$SUBCOMMAND" == "check" ]]; then
+  echo "→ checking current state of alias '$ALIAS'"
+  ENV_BLOB=$(snapshot_orchestrator_env)
+  if [[ -z "$ENV_BLOB" ]]; then
+    echo "  no orchestrator running; can't snapshot env" >&2
+    exit 1
+  fi
+  echo "  storage_provider=$(echo "$ENV_BLOB" | grep ^STORAGE_PROVIDER= | cut -d= -f2-)"
+
+  CUR_BUILD=$(ssh "$ORCH" "
+    PGPASSWORD=\$(sudo cat /proc/\$(pgrep -f 'bin/api' | head -1)/environ 2>/dev/null \
+      | tr '\0' '\n' | grep '^POSTGRES_CONNECTION_STRING=' \
+      | sed 's|.*//e2b:||;s|@.*||')
+    PGPASSWORD=\$PGPASSWORD psql -h 127.0.0.1 -U e2b -d e2b -tAc \
+      \"select build_id from env_build_assignments
+        where env_id=(select env_id from env_aliases where alias='${ALIAS}')
+        order by created_at desc limit 1\"
+  ")
+  CUR_BUILD=$(echo "$CUR_BUILD" | tr -d '[:space:]')
+  echo "  active build_id: $CUR_BUILD"
+
+  if verify_snapshot_in_storage "$CUR_BUILD" "$ENV_BLOB"; then
+    echo "✅  snapshot files present; orchestrator should be able to spawn"
+    exit 0
+  else
+    echo "❌  snapshot files MISSING — fresh sandbox spawns will fail with 'sandbox files not found'"
+    exit 1
+  fi
+fi
+
+# ── 0. resolve registry tag + sync runtime ────────────────────────────
+if [[ "$SKIP_RUNTIME_SYNC" -eq 0 ]]; then
+  echo "→ syncing hive-src/ from \$HIVE_SRC (default \$HOME/aden/hive-desktop-runtime)"
+  bash "$ROOT/sync-hive-src.sh"
+fi
+
+# Drift warning: if the AppImage's bundled hive-runtime rev is on disk and
+# differs from the one we're about to bake into the VM template, flag it.
+APPIMAGE_REV_PATHS=(
+  "$HOME/aden/hive-desktop/release/OpenHive-0.1.0-linux-x64/resources/hive/.hive-source-rev"
+  "$HOME/aden/hive-desktop/vendor/hive/.hive-source-rev"
+)
+for p in "${APPIMAGE_REV_PATHS[@]}"; do
+  if [[ -f "$p" && -f "$ROOT/hive-src/.hive-source-rev" ]]; then
+    APP_REV=$(cat "$p")
+    VM_REV=$(cat "$ROOT/hive-src/.hive-source-rev")
+    if [[ "$APP_REV" != "$VM_REV" ]]; then
+      echo "  ⚠ drift: AppImage hive-runtime is at $APP_REV, VM template will be at $VM_REV"
+      echo "    ($p vs $ROOT/hive-src/.hive-source-rev)"
+    fi
+    break
+  fi
+done
+
 if [[ -z "$TAG" ]]; then
   echo "→ inspecting registry for next colonies-vN tag"
   EXISTING=$(ssh "$ORCH" "curl -sS http://127.0.0.1:5000/v2/hive-novnc/tags/list" \
@@ -57,8 +234,17 @@ fi
 IMAGE="127.0.0.1:5000/hive-novnc:${TAG}"
 NEW_BUILD_ID="$(uuidgen)"
 
+# Capture the runtime source rev/branch so we can stamp it into env_builds.reason.
+SOURCE_REV=""
+SOURCE_BRANCH=""
+if [[ -f "$ROOT/hive-src/.hive-source-rev" ]]; then
+  SOURCE_REV=$(cat "$ROOT/hive-src/.hive-source-rev")
+fi
+if [[ -f "$ROOT/hive-src/.hive-source-branch" ]]; then
+  SOURCE_BRANCH=$(cat "$ROOT/hive-src/.hive-source-branch")
+fi
+
 # ── 1. rsync source → orchestrator ───────────────────────────────────
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ "$SKIP_SYNC" -eq 0 ]]; then
   echo "→ rsync ${ROOT}/ → ${ORCH}:/home/${ORCH_USER}/infra/sandbox-images/hive-novnc/"
   rsync -a --delete \
@@ -74,67 +260,66 @@ ssh "$ORCH" "cd /home/${ORCH_USER}/infra/sandbox-images/hive-novnc && \
 echo "→ docker push $IMAGE"
 ssh "$ORCH" "sudo docker push ${IMAGE} 2>&1 | tail -2 && sudo docker push 127.0.0.1:5000/hive-novnc:latest 2>&1 | tail -2"
 
-# ── 3. stop nomad → free :5007 ───────────────────────────────────────
-# nomad respawns the orchestrator alloc on any kill; stopping the agent
-# itself is the only way to keep the port free long enough for create-build.
-echo "→ stopping nomad agent + orchestrator alloc"
-ssh "$ORCH" "
-  sudo systemctl stop nomad
-  sleep 2
-  sudo pkill -KILL -f 'nomad executor' 2>/dev/null || true
-  sudo pkill -KILL -f 'bin/orchestrator' 2>/dev/null || true
-  sudo pkill -KILL -f 'bin/api' 2>/dev/null || true
-  sleep 2
-  if sudo ss -tlnp | grep -q ':5007'; then
-    echo '!! 5007 still bound — refusing to continue'
-    sudo ss -tlnp | grep ':5007'
-    exit 1
-  fi
-"
+# ── 3. snapshot the orchestrator's env BEFORE we stop it ─────────────
+# This is the change that fixes the 2026-04-29 outage: the orchestrator
+# runs with STORAGE_PROVIDER=AWSBucket + minio creds in production. The
+# prior version of this script hardcoded STORAGE_PROVIDER=Local and the
+# build snapshot landed in a place the orchestrator never reads.
+echo "→ snapshotting orchestrator env (storage / registry / host paths)"
+ENV_BLOB=$(snapshot_orchestrator_env)
+if [[ -z "$ENV_BLOB" ]]; then
+  echo "!! no orchestrator running — can't determine storage provider" >&2
+  exit 1
+fi
+ENV_PROVIDER=$(echo "$ENV_BLOB" | grep '^STORAGE_PROVIDER=' | cut -d= -f2-)
+echo "  STORAGE_PROVIDER=${ENV_PROVIDER}"
+echo "  $(echo "$ENV_BLOB" | wc -l) env vars captured"
 
-# ── 4. create-build → Firecracker snapshot ───────────────────────────
+# ── 4. stop nomad → free :5007 ───────────────────────────────────────
+echo "→ stopping nomad agent + orchestrator alloc"
+stop_orchestrator
+
+# ── 5. create-build → snapshot to whichever storage the orch uses ────
 echo "→ create-build → $NEW_BUILD_ID"
+# Pipe ENV_BLOB into a single ssh stdin so the env is set inside the
+# remote shell exactly as the orchestrator had it.
+ENV_ARGS=$(echo "$ENV_BLOB" | sed 's/^/    /')
 ssh "$ORCH" "
   cd /home/${ORCH_USER}/infra/sandbox-images/hive-novnc
-  sudo timeout 900 /usr/bin/env \
-    STORAGE_PROVIDER=Local \
-    LOCAL_TEMPLATE_STORAGE_BASE_PATH=/orchestrator/build-cache/templates \
-    LOCAL_BUILD_CACHE_STORAGE_BASE_PATH=/orchestrator/build-cache \
-    USE_LOCAL_NAMESPACE_STORAGE=true \
-    ENVIRONMENT=local \
-    DOCKERHUB_REMOTE_REPOSITORY_PROVIDER=Local \
-    HOST_BUSYBOX_DIR=/fc-busybox \
-    HOST_KERNELS_DIR=/fc-kernels \
-    FIRECRACKER_VERSIONS_DIR=/fc-versions \
-    HOST_ENVD_PATH=/fc-envd/envd \
-    /home/${ORCH_USER}/infra/packages/orchestrator/bin/create-build \
-      -to-build $NEW_BUILD_ID \
-      -template $ALIAS \
-      -vcpu 2 -memory 2560 -disk 6144 \
-      -hugepages=false \
-      -fromImage $IMAGE \
-      -storage /orchestrator/build-cache 2>&1 | tail -3
+  sudo timeout 900 /usr/bin/env \\
+$ENV_ARGS \\
+    /home/${ORCH_USER}/infra/packages/orchestrator/bin/create-build \\
+      -to-build $NEW_BUILD_ID \\
+      -template $ALIAS \\
+      -vcpu 2 -memory 2560 -disk 6144 \\
+      -hugepages=false \\
+      -fromImage $IMAGE 2>&1 | tail -5
 "
 
-# ── 5. restart nomad ─────────────────────────────────────────────────
+# ── 6. verify snapshot is in the storage location the orch reads ─────
+echo "→ verifying snapshot files in storage backend"
+if ! verify_snapshot_in_storage "$NEW_BUILD_ID" "$ENV_BLOB"; then
+  echo "!! snapshot verification FAILED — refusing to flip the alias." >&2
+  echo "   alias '$ALIAS' still points at the previous build_id." >&2
+  echo "   Inspect the broken build with: ./roll-template.sh check -a $ALIAS" >&2
+  echo "   Restarting nomad to bring the cluster back up." >&2
+  start_orchestrator || true
+  exit 1
+fi
+echo "  ✓ all six expected files present"
+
+# ── 7. restart nomad ─────────────────────────────────────────────────
 echo "→ restart nomad"
-ssh "$ORCH" "
-  sudo systemctl start nomad
-  for i in 1 2 3 4 5 6 7 8; do
-    sleep 2
-    if sudo ss -tlnp | grep -q 'orchestrator.*:5007'; then
-      echo '   orchestrator back on 5007 (\$i tries)'
-      break
-    fi
-  done
-"
+start_orchestrator
 
-# ── 6. register build → make it the active build for the alias ───────
-# This is the step the underlying create-build CLI does NOT do — it
-# writes the snapshot to disk but leaves the e2b API/postgres mapping
-# pointing at the previous build. Without this, fresh sandboxes still
-# spawn from the old build.
-echo "→ register build in postgres"
+# ── 8. register build → make it the active build for the alias ───────
+# Stamps source_rev / source_branch / image_tag into env_builds.reason
+# so a later forensics query can answer "which commit was that build
+# from?" instantly without grepping through orchestrator logs.
+echo "→ register build in postgres (with source-rev forensics)"
+REASON_JSON=$(printf '{"source_rev":"%s","source_branch":"%s","image_tag":"%s","rolled_at":"%s"}' \
+              "$SOURCE_REV" "$SOURCE_BRANCH" "$TAG" "$(date -u +%FT%TZ)")
+
 ssh "$ORCH" "
   PGPASSWORD=\$(sudo cat /proc/\$(pgrep -f 'bin/api' | head -1)/environ 2>/dev/null \
     | tr '\0' '\n' | grep '^POSTGRES_CONNECTION_STRING=' \
@@ -144,7 +329,7 @@ ssh "$ORCH" "
   TEAM_ID=\$(PGPASSWORD=\$PGPASSWORD psql -h 127.0.0.1 -U e2b -d e2b -tAc \
     \"select team_id from envs where id='\$ENV_ID'\")
   if [[ -z \"\$ENV_ID\" || -z \"\$TEAM_ID\" ]]; then
-    echo \"!! alias '${ALIAS}' has no env mapping in postgres — register the env first\"
+    echo \"!! alias '${ALIAS}' has no env mapping in postgres — register the env first\" >&2
     exit 1
   fi
   PGPASSWORD=\$PGPASSWORD psql -h 127.0.0.1 -U e2b -d e2b <<SQL
@@ -157,35 +342,49 @@ INSERT INTO env_builds (
   '$NEW_BUILD_ID', NOW(), NOW(), NOW(),
   'uploaded', 2, 2560, 4096, 6144,
   'vmlinux-6.1.158', 'v1.12.1_210cbac', \$ENV_ID, '0.1.0',
-  '{}'::jsonb, 'ready', \$TEAM_ID
+  '$REASON_JSON'::jsonb, 'ready', \$TEAM_ID
 );
 INSERT INTO env_build_assignments (env_id, build_id, tag, source)
 VALUES (\$ENV_ID, '$NEW_BUILD_ID', 'default', 'app');
 SQL
 "
 
-# ── 7. verify via the e2b API ────────────────────────────────────────
+# ── 9. verify via the e2b API ────────────────────────────────────────
 echo "→ verify with e2b API"
-E2B_KEY=$(kubectl exec -n staging staging-hive-app-6fc9ff85c9-55hnt -- env 2>/dev/null \
-  | grep '^E2B_API_KEY=' | cut -d= -f2- || true)
+E2B_KEY=""
+# Try to discover the API key from a staging-hive-app pod if kubectl is
+# available. Falls back to manual verification instructions otherwise.
+if command -v kubectl >/dev/null 2>&1; then
+  POD=$(kubectl -n staging get pods -o name 2>/dev/null | grep 'staging-hive-app' | head -1 | sed 's|pod/||')
+  if [[ -n "$POD" ]]; then
+    E2B_KEY=$(kubectl -n staging exec "$POD" -- env 2>/dev/null \
+      | grep '^E2B_API_KEY=' | cut -d= -f2- || true)
+  fi
+fi
 if [[ -n "$E2B_KEY" ]]; then
   curl -sS -m 5 https://api.vm.open-hive.com/templates -H "X-API-Key: $E2B_KEY" \
     | python3 -c "import json,sys; d=json.load(sys.stdin); \
       print('alias=', [t['aliases'] for t in d if '${ALIAS}' in t['aliases']]); \
       print('buildID=', [t['buildID'] for t in d if '${ALIAS}' in t['aliases']])"
 else
-  echo "  (skipped — no kubectl access for E2B_API_KEY; check https://api.vm.open-hive.com/templates manually)"
+  echo "  (skipped — no E2B_API_KEY discovered; verify manually:"
+  echo "    curl https://api.vm.open-hive.com/templates -H 'X-API-Key: \$E2B_KEY')"
 fi
 
 cat <<DONE
 
 ═══════════════════════════════════════════════════════════════════
   Template rolled.
-    alias    : ${ALIAS}
-    image    : ${IMAGE}
-    build_id : ${NEW_BUILD_ID}
+    alias       : ${ALIAS}
+    image       : ${IMAGE}
+    build_id    : ${NEW_BUILD_ID}
+    source_rev  : ${SOURCE_REV:-(unset)}
+    source_branch: ${SOURCE_BRANCH:-(unset)}
 ═══════════════════════════════════════════════════════════════════
 
 Next sandbox spawn will use the new build. Old running sandboxes are
 unchanged (they hold the previous build snapshot in memory).
+
+Run \`./parity-test.sh --colony parity_smoke\` to confirm a colony
+behaves equivalently against this template vs the local runtime.
 DONE

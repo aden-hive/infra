@@ -1,0 +1,31 @@
+{
+  "name": "worker",
+  "version": "1.0.0",
+  "description": "Parity-smoke worker — no-tool reply for testing local↔remote equivalence",
+  "input_data": {
+    "colony_id": "parity_smoke",
+    "task_id": "parity-smoke-deterministic"
+  },
+  "goal": {
+    "description": "Reply with the single word 'pong' and call set_output to finish. Use no other tools.",
+    "success_criteria": ["set_output called with 'pong' as the value"],
+    "constraints": []
+  },
+  "system_prompt": "You are a parity-test worker. Your only job is to call set_output with the value 'pong' and stop. Do not call any other tool. Do not browse, read files, or search. Just respond and call set_output.",
+  "tools": [],
+  "skills_catalog_prompt": "",
+  "protocols_prompt": "",
+  "skill_dirs": [],
+  "identity_prompt": "",
+  "memory_prompt": "",
+  "queen_phase": "independent",
+  "queen_id": "queen_growth",
+  "loop_config": {
+    "max_iterations": 5,
+    "max_tool_calls_per_turn": 5,
+    "max_context_tokens": 32000,
+    "max_tool_result_chars": 4000
+  },
+  "spawned_from": "session_smoke",
+  "spawned_at": "2026-05-06T00:00:00+00:00"
+}

@@ -1,0 +1,2 @@
+# Empty conversation tree — fresh worker. The directory has to exist for
+# the multi-root tar to include it; tarring an empty dir is fine.
