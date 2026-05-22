@@ -434,11 +434,13 @@ func (u *Userfaultfd) Serve(
 				// memfd-wake only resolves a pending UFFD fault (the kernel
 				// thread is blocked); Prefault has no blocked thread and
 				// must go through faultPage's atomic UFFDIO_COPY install.
+				// Read faults also require faultPage's UFFDIO_COPY_MODE_WP
+				// to atomically install the page with write-protection.
 				var (
 					outcome faultOutcome
 					err     error
 				)
-				if memfd := u.memfd.Load(); memfd != nil && source != nil {
+				if memfd := u.memfd.Load(); memfd != nil && source != nil && accessType == block.Write {
 					outcome, err = u.faultPageViaMemfdWake(ctx, addr, offset, accessType, source, memfd, fdExit.SignalExit)
 				} else {
 					outcome, err = u.faultPage(ctx, addr, offset, accessType, source, fdExit.SignalExit)

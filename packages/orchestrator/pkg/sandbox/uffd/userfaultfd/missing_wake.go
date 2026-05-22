@@ -19,7 +19,10 @@ import (
 
 // faultPageViaMemfdWake installs a MISSING fault by writing source bytes
 // into the FC-shared memfd and calling UFFDIO_WAKE, skipping the
-// UFFDIO_COPY kernel memcpy. Read faults arm WP first.
+// UFFDIO_COPY kernel memcpy. This function must only be called for write
+// faults; read faults require UFFDIO_COPY_MODE_WP for atomic page install
+// with write-protection (calling UFFDIO_WRITEPROTECT before the PTE exists
+// silently fails without UFFD_FEATURE_WP_UNPOPULATED).
 func (u *Userfaultfd) faultPageViaMemfdWake(
 	ctx context.Context,
 	addr uintptr,
@@ -32,25 +35,6 @@ func (u *Userfaultfd) faultPageViaMemfdWake(
 	span := trace.SpanFromContext(ctx)
 	pageSize := int64(u.pageSize)
 	offset &^= pageSize - 1
-
-	if accessType == block.Read {
-		if err := u.fd.writeProtect(addr, u.pageSize, UFFDIO_WRITEPROTECT_MODE_WP); err != nil {
-			if errors.Is(err, unix.ESRCH) {
-				span.SetAttributes(attribute.Bool("uffd.process_exited", true))
-
-				return faultDiscarded, nil
-			}
-			if errors.Is(err, unix.EAGAIN) {
-				return faultDeferred, nil
-			}
-
-			joined := errors.Join(err, safeInvoke(onFailure))
-			span.RecordError(joined)
-			u.logger.Error(ctx, "UFFD memfd-wake writeProtect error", zap.Error(joined))
-
-			return faultDiscarded, fmt.Errorf("pre-WAKE writeProtect: %w", joined)
-		}
-	}
 
 	dst := memfd.Bytes()
 	if int64(len(dst)) < offset+pageSize {
