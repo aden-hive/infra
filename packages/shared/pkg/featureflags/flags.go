@@ -3,6 +3,7 @@ package featureflags
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -115,6 +116,21 @@ func OverrideJSONFlag(flag JSONFlag, value ldvalue.Value) {
 	launchDarklyOfflineStore.Update(builder)
 }
 
+// ApplyBoolOverridesFromEnv applies bool flag overrides from env vars of the
+// form FF_<flag-key>=true|false (the LD flag key, case-sensitive). Only takes
+// effect when LAUNCH_DARKLY_API_KEY is not set.
+func ApplyBoolOverridesFromEnv(flags ...BoolFlag) {
+	for _, flag := range flags {
+		v := os.Getenv("FF_" + flag.name)
+		switch v {
+		case "true", "1":
+			OverrideBoolFlag(flag, true)
+		case "false", "0":
+			OverrideBoolFlag(flag, false)
+		}
+	}
+}
+
 var (
 	MetricsWriteFlag                    = NewBoolFlag("sandbox-metrics-write", true)
 	MetricsReadFlag                     = NewBoolFlag("sandbox-metrics-read", true)
@@ -138,6 +154,12 @@ var (
 	// a goroutine so Pause returns as soon as the diff metadata is written.
 	// Only takes effect when UseMemFdFlag is also on.
 	MemfdBackgroundCopyFlag = NewBoolFlag("memfd-background-copy", false)
+
+	// UseMemfdWakeFlag installs UFFD MISSING faults by writing into the
+	// FC-shared memfd and calling UFFDIO_WAKE instead of UFFDIO_COPY,
+	// skipping the kernel-side memcpy. Only takes effect when UseMemFdFlag
+	// is also on.
+	UseMemfdWakeFlag = NewBoolFlag("use-memfd-wake", false)
 
 	// MemfileDiffDedupFlag enables 4 KiB-page dedup of the memfile diff
 	// against the base memfile. bestEffort skips uncached blocks;

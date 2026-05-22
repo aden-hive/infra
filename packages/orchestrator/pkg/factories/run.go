@@ -361,6 +361,9 @@ func run(config cfg.Config, opts Options) (success bool) {
 
 	featureFlags.SetDeploymentName(config.DomainName)
 
+	// Lets integration tests / dev exercise gated paths without LaunchDarkly.
+	featureflags.ApplyBoolOverridesFromEnv(featureflags.UseMemFdFlag, featureflags.UseMemfdWakeFlag)
+
 	// gcp concurrent upload limiter
 	limiter, err := limit.New(ctx, featureFlags)
 	if err != nil {
