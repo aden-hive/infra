@@ -38,7 +38,6 @@ import (
 
 const (
 	googleReadTimeout              = 10 * time.Second
-	googleReadIdleTimeout          = 10 * time.Second
 	googleOperationTimeout         = 5 * time.Second
 	googleBufferSize               = 4 << 20 // 4 MiB
 	googleInitialBackoff           = 10 * time.Millisecond
@@ -281,39 +280,35 @@ func (o *gcpObject) openRangeReader(ctx context.Context, off, length int64) (io.
 		return nil, fmt.Errorf("failed to create GCS range reader for %q at %d+%d: %w", o.path, off, length, err)
 	}
 
-	return &idleTimeoutReader{ReadCloser: reader, cancel: cancel, idle: googleReadIdleTimeout}, nil
+	return &idleTimeoutReader{
+		ReadCloser: reader,
+		cancel:     cancel,
+		timer:      time.AfterFunc(googleReadTimeout, cancel),
+	}, nil
 }
 
-// idleTimeoutReader cancels the GCS stream if no Read completes within idle.
 type idleTimeoutReader struct {
 	io.ReadCloser
 
 	cancel context.CancelFunc
-	idle   time.Duration
 	timer  *time.Timer
 }
 
 func (r *idleTimeoutReader) Read(p []byte) (int, error) {
-	if r.timer == nil {
-		r.timer = time.AfterFunc(r.idle, r.cancel)
-	} else {
-		r.timer.Reset(r.idle)
-	}
+	r.timer.Reset(googleReadTimeout)
 
 	n, err := r.ReadCloser.Read(p)
 	if err != nil {
 		r.timer.Stop()
 	} else {
-		r.timer.Reset(r.idle)
+		r.timer.Reset(googleReadTimeout)
 	}
 
 	return n, err
 }
 
 func (r *idleTimeoutReader) Close() error {
-	if r.timer != nil {
-		r.timer.Stop()
-	}
+	r.timer.Stop()
 	defer r.cancel()
 
 	return r.ReadCloser.Close()

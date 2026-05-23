@@ -16,7 +16,6 @@ import (
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 )
 
-// postTransitionRetryWindow covers GCS post-finalize visibility lag.
 const postTransitionRetryWindow = 30 * time.Second
 
 var _ storage.Seekable = (*peerSeekable)(nil)
@@ -143,20 +142,14 @@ func (s *peerSeekable) OpenRangeReader(ctx context.Context, off int64, length in
 	}
 
 	rc, err := base.OpenRangeReader(ctx, off, length, frameTable)
-	if errors.Is(err, storage.ErrObjectNotExist) && s.withinTransitionWindow() {
-		return nil, &storage.PeerTransitionedError{}
+	if errors.Is(err, storage.ErrObjectNotExist) {
+		at := s.transitionAt.Load()
+		if at != 0 && time.Since(time.Unix(0, at)) < postTransitionRetryWindow {
+			return nil, &storage.PeerTransitionedError{}
+		}
 	}
 
 	return rc, err
-}
-
-func (s *peerSeekable) withinTransitionWindow() bool {
-	at := s.transitionAt.Load()
-	if at == 0 {
-		return false
-	}
-
-	return time.Since(time.Unix(0, at)) < postTransitionRetryWindow
 }
 
 func (s *peerSeekable) StoreFile(context.Context, string, ...storage.PutOption) (*storage.FrameTable, [32]byte, error) {

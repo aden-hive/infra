@@ -21,7 +21,6 @@ const v4SizePrefixLen = 4
 // v4FlagsLen is the length of the V4 flags byte. Bit 0 = IncompletePendingUpload.
 const v4FlagsLen = 1
 
-// v4MaxUncompressedHeaderSize caps LZ4 expansion to bound a corrupt header.
 const v4MaxUncompressedHeaderSize = 64 << 20
 
 // v4FlagIncomplete is bit 0 of the V4 flags byte: when set, the header
@@ -253,7 +252,6 @@ func extractRelevantRanges(mappings []BuildMap) map[uuid.UUID][]storage.Range {
 	return ranges
 }
 
-// decompressLZ4 reads at most expected+1 bytes; caller verifies length.
 func decompressLZ4(src []byte, expected int) ([]byte, error) {
 	r := lz4.NewReader(bytes.NewReader(src))
 
