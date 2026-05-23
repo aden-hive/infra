@@ -16,7 +16,10 @@ import (
 	"github.com/e2b-dev/infra/packages/shared/pkg/storage"
 )
 
-const postTransitionRetryWindow = 30 * time.Second
+const (
+	postTransitionRetryWindow = 30 * time.Second
+	postTransitionRetryDelay  = 250 * time.Millisecond
+)
 
 var _ storage.Seekable = (*peerSeekable)(nil)
 
@@ -145,9 +148,7 @@ func (s *peerSeekable) OpenRangeReader(ctx context.Context, off int64, length in
 	if errors.Is(err, storage.ErrObjectNotExist) {
 		at := s.transitionAt.Load()
 		if at != 0 && time.Since(time.Unix(0, at)) < postTransitionRetryWindow {
-			if s.transitionAt.CompareAndSwap(at, 0) {
-				return nil, &storage.PeerTransitionedError{}
-			}
+			return nil, &storage.PeerTransitionedError{RetryAfter: postTransitionRetryDelay}
 		}
 	}
 
