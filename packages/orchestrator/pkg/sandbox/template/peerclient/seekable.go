@@ -145,9 +145,8 @@ func (s *peerSeekable) OpenRangeReader(ctx context.Context, off int64, length in
 	if errors.Is(err, storage.ErrObjectNotExist) {
 		at := s.transitionAt.Load()
 		if at != 0 && time.Since(time.Unix(0, at)) < postTransitionRetryWindow {
-			if s.transitionAt.CompareAndSwap(at, 0) {
-				return nil, &storage.PeerTransitionedError{}
-			}
+			s.transitionAt.CompareAndSwap(at, 0)
+			return nil, &storage.PeerTransitionedError{}
 		}
 	}
 
