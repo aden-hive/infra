@@ -68,7 +68,7 @@ func (u *Userfaultfd) faultPageViaMemfdWake(
 		return faultDiscarded, errors.Join(err, safeInvoke(onFailure))
 	}
 
-	page := dst[offset : offset+pageSize]
+	tmpBuf := make([]byte, pageSize)
 
 	var dataErr error
 	var attempt int
@@ -76,7 +76,7 @@ func (u *Userfaultfd) faultPageViaMemfdWake(
 retryLoop:
 	for attempt = range sliceMaxRetries + 1 {
 		var n int
-		n, dataErr = source.ReadAt(ctx, page, offset)
+		n, dataErr = source.ReadAt(ctx, tmpBuf, offset)
 		if dataErr == nil && int64(n) != pageSize {
 			dataErr = fmt.Errorf("short read at %d: got %d, want %d", offset, n, pageSize)
 		}
@@ -115,9 +115,6 @@ retryLoop:
 	}
 
 	if err := u.fd.wake(addr, u.pageSize); err != nil {
-		// EEXIST: page already installed by a concurrent path. The memfd
-		// write is idempotent (same source for on-demand and prefault),
-		// matching UFFDIO_COPY's first-writer-wins semantics.
 		if errors.Is(err, unix.EEXIST) {
 			span.SetAttributes(attribute.Bool("uffd.already_mapped", true))
 
@@ -138,6 +135,8 @@ retryLoop:
 
 		return faultDiscarded, fmt.Errorf("UFFDIO_WAKE: %w", joined)
 	}
+
+	copy(dst[offset:offset+pageSize], tmpBuf)
 
 	return faultInstalled, nil
 }
