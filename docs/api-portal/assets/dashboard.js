@@ -194,29 +194,61 @@
     });
   }
 
+  function fmtRelative(s) {
+    if (!s) return "—";
+    try {
+      const d = new Date(s);
+      const sec = Math.floor((Date.now() - d.getTime()) / 1000);
+      if (sec < 60) return `${sec}s ago`;
+      if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+      if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+      return `${Math.floor(sec / 86400)}d ago`;
+    } catch { return s; }
+  }
+  function fmtAbsolute(s) {
+    if (!s) return "—";
+    try {
+      const d = new Date(s);
+      return d.toLocaleString();
+    } catch { return s; }
+  }
+
+  function eventCategoryClass(eventType) {
+    if (eventType.startsWith("terminate_")) return "error";
+    if (eventType.startsWith("pause_")) return "muted";
+    if (eventType === "spawn" || eventType === "resume") return "ok";
+    return "";
+  }
+
   function renderEvents(events) {
     const ul = $("events-list");
     if (!events || events.length === 0) {
       ul.innerHTML = `<div class="dim" style="padding:8px 0;">No events yet.</div>`;
       return;
     }
-    ul.innerHTML = `<table><thead><tr><th>When</th><th>Event</th><th>User</th><th>Detail</th></tr></thead><tbody>${
-      events.map((e) => {
-        const detailStr = e.detail && Object.keys(e.detail).length
-          ? `<code style="font-size:11px;">${escape(JSON.stringify(e.detail))}</code>`
-          : "—";
-        const cls = e.eventType.startsWith("terminate_") ? "error"
-          : e.eventType.startsWith("pause_") ? "muted"
-          : (e.eventType === "spawn" || e.eventType === "resume") ? "ok"
-          : "";
-        return `<tr>
-          <td class="dim">${fmtDate(e.occurredAt)}</td>
-          <td class="${cls}">${escape(e.eventType)}</td>
-          <td>${e.userId ?? "—"}</td>
-          <td>${detailStr}</td>
-        </tr>`;
-      }).join("")
-    }</tbody></table>`;
+    // Card-per-event layout. Avoids the table-column-width problem with
+    // long detail JSON: the JSON block wraps freely under the metadata
+    // row, doesn't fight the card width.
+    ul.innerHTML = events.map((e) => {
+      const cls = eventCategoryClass(e.eventType);
+      const hasDetail = e.detail && Object.keys(e.detail).length > 0;
+      const detailHtml = hasDetail
+        ? `<pre class="event-detail">${escape(JSON.stringify(e.detail, null, 2))}</pre>`
+        : "";
+      const userBadge = e.userId != null
+        ? `<span class="dim">· user ${escape(String(e.userId))}</span>`
+        : `<span class="dim">· system</span>`;
+      return `
+        <div class="event-row">
+          <div class="event-row-head">
+            <span class="event-type ${cls}">${escape(e.eventType)}</span>
+            ${userBadge}
+            <span class="event-time" title="${escape(fmtAbsolute(e.occurredAt))}">${escape(fmtRelative(e.occurredAt))}</span>
+          </div>
+          ${detailHtml}
+        </div>
+      `;
+    }).join("");
   }
 
   // ── handlers ────────────────────────────────────────────────────────

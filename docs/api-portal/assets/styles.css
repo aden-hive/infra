@@ -357,3 +357,48 @@ tr:last-child td { border-bottom: 0; }
 .dim { color: var(--text-dim); }
 .error { color: var(--destroyed); }
 .ok { color: var(--running); }
+
+/* Recent events list — card-per-event layout. Long detail JSON wraps
+ * under the metadata row instead of widening the row. */
+.event-row {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.event-row:last-child { border-bottom: 0; }
+.event-row-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+}
+.event-type {
+  font-family: "SF Mono", monospace;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+.event-type.ok { color: var(--running); }
+.event-type.error { color: var(--destroyed); }
+.event-type.muted { color: var(--paused); }
+.event-time {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-family: "SF Mono", monospace;
+  white-space: nowrap;
+}
+.event-detail {
+  margin: 6px 0 0;
+  padding: 8px 12px;
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  border-radius: 4px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-muted);
+  white-space: pre-wrap;       /* JSON keys/values wrap at spaces */
+  word-break: break-word;      /* unbroken strings (uuids, etc) still wrap */
+  overflow-x: auto;            /* fallback for genuinely unbreakable content */
+  max-height: 240px;           /* cap a giant detail blob */
+  overflow-y: auto;
+}
