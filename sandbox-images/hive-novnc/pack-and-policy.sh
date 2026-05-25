@@ -29,11 +29,21 @@ PY
 echo "EXTENSION_ID=$EXT_ID"
 echo "$EXT_ID" > "$OUT/ext_id"
 
+# Read the version straight from the manifest so update.xml never lies
+# about what's actually in the .crx. Chrome refuses to force-install
+# when the advertised version doesn't match the bundled manifest, so
+# hardcoding (the prior behavior, 1.0.0) silently broke whenever the
+# extension bumped — which is how the VM template ended up two versions
+# behind the runtime.
+EXT_VERSION=$(python3 -c "import json; print(json.load(open('$SRC/manifest.json'))['version'])")
+echo "EXTENSION_VERSION=$EXT_VERSION"
+echo "$EXT_VERSION" > "$OUT/ext_version"
+
 cat > "$OUT/update.xml" <<XML
 <?xml version='1.0' encoding='UTF-8'?>
 <gupdate xmlns='http://www.google.com/update2/response' protocol='2.0'>
   <app appid='$EXT_ID'>
-    <updatecheck codebase='http://127.0.0.1:9999/hive.crx' version='1.0.0' />
+    <updatecheck codebase='http://127.0.0.1:9999/hive.crx' version='$EXT_VERSION' />
   </app>
 </gupdate>
 XML

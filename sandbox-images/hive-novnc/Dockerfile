@@ -39,7 +39,13 @@ RUN useradd -m -u 1001 -s /bin/bash hive \
     && mkdir -p /data/chrome /var/log/supervisor \
     && chown -R hive:hive /home/hive /data
 
-COPY hive-extension /opt/hive-extension
+# Source the Chrome extension from the auto-synced runtime tree
+# (sync-hive-src.sh mirrors hive-desktop-runtime/tools/browser-extension/
+# into hive-src/tools/browser-extension/ on every roll). The previous
+# standalone hive-extension/ dir was hand-maintained and drifted two
+# versions behind the runtime — the bundled VM kept shipping v1.0.0
+# while the runtime had moved to v1.2.3 (sidepanel-based UI, icons).
+COPY hive-src/tools/browser-extension /opt/hive-extension
 COPY pack-and-policy.sh /usr/local/bin/pack-and-policy.sh
 RUN chmod +x /usr/local/bin/pack-and-policy.sh && /usr/local/bin/pack-and-policy.sh
 
