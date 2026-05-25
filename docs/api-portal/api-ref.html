@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Hive VM control · API reference</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  /* Scalar paints its own UI into the document; just give it the
+   * whole viewport and dark background while it loads. */
+  html, body { margin: 0; padding: 0; min-height: 100%; background: #0b0f15; color: #e6edf3; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #boot {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: #5d6b7d; font-size: 13px; pointer-events: none; z-index: 1;
+  }
+  #boot.err { color: #ff8e8e; pointer-events: auto; padding: 0 24px; text-align: center; }
+  #boot a { color: #58a6ff; }
+</style>
+</head>
+<body>
+<div id="boot">Loading API reference…</div>
+
+<!--
+  Scalar API Reference embed — canonical pattern.
+  The script tag with id="api-reference" is the mount point; Scalar's
+  bundle (loaded next) reads `data-url` for the spec and `data-configuration`
+  (a JSON string) for theme/layout. DO NOT add `type="application/json"`
+  here — that would mark the tag inert and Scalar's renderer wouldn't
+  re-execute after parsing attributes.
+-->
+<script
+  id="api-reference"
+  data-url="openapi.yaml"
+  data-configuration='{"theme":"deepSpace","layout":"modern","hideClientButton":false,"defaultHttpClient":{"targetKey":"shell","clientKey":"curl"}}'
+></script>
+<script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+<script>
+  // Watch for Scalar's DOM to mount, then dismiss the boot hint.
+  // Scalar appends its own root element after init; the easiest signal
+  // is just "the body has more than the two scripts + the boot div."
+  const boot = document.getElementById("boot");
+  const settled = () => Array.from(document.body.children).some(
+    (el) => el.tagName !== "SCRIPT" && el.id !== "boot"
+  );
+
+  const obs = new MutationObserver(() => {
+    if (settled()) {
+      boot.remove();
+      obs.disconnect();
+    }
+  });
+  obs.observe(document.body, { childList: true, subtree: false });
+
+  // Hard timeout — if Scalar's CDN script never landed, show the
+  // failure mode instead of hanging at "Loading…" forever.
+  setTimeout(() => {
+    if (!settled()) {
+      boot.classList.add("err");
+      boot.innerHTML =
+        'Scalar API Reference did not render in 12s.<br>' +
+        'Check DevTools network tab for blocked requests, then ' +
+        '<a href="openapi.yaml" target="_blank">open the raw spec</a> ' +
+        'or try the <a href="https://editor.swagger.io/?url=" target="_blank">Swagger editor</a>.';
+    }
+  }, 12000);
+</script>
+</body>
+</html>
