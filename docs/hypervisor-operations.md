@@ -11,6 +11,7 @@ the automation drift, the doc wins — fix the automation.
 ## Audience
 
 You have:
+
 - SSH access to `ubuntu@135.148.52.236` (the single OVH host running e2b)
 - `kubectl` configured for the `staging` namespace (hive-backend lives there)
 - `gcloud` auth for project `tool-for-analyst` (hive-secrets in GCP Secret Manager)
@@ -19,26 +20,26 @@ You have:
   `~/aden/hive-desktop-runtime`
 
 If you don't have one of those, you can't do most of what's in this
-doc — ask Tim to provision.
+doc — ask Timothy to provision.
 
 ## Mental model
 
 Four storage layers, all on the OVH host:
 
-| Layer | Where | What it holds |
-|---|---|---|
-| **e2b postgres** | `127.0.0.1:5432` db=`e2b` user=`e2b` | `envs`, `env_aliases`, `env_builds`, `env_build_assignments`, `snapshots`, `team_api_keys` |
-| **Docker registry** | `127.0.0.1:5000` | OCI images that VM templates build from (`hive-novnc:colonies-vN`) |
-| **MinIO snapshots** | `/srv/minio/e2b-templates/<build_id>/` | The 6 Firecracker snapshot files per build (memfile, rootfs.ext4, snapfile, …) |
-| **Firecracker runtime** | `/orchestrator/sandboxes/<sbx_id>/`, `/tmp/fc-*.sock` | Live microVM state per running sandbox |
+| Layer                   | Where                                                 | What it holds                                                                              |
+| ----------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| **e2b postgres**        | `127.0.0.1:5432` db=`e2b` user=`e2b`                  | `envs`, `env_aliases`, `env_builds`, `env_build_assignments`, `snapshots`, `team_api_keys` |
+| **Docker registry**     | `127.0.0.1:5000`                                      | OCI images that VM templates build from (`hive-novnc:colonies-vN`)                         |
+| **MinIO snapshots**     | `/srv/minio/e2b-templates/<build_id>/`                | The 6 Firecracker snapshot files per build (memfile, rootfs.ext4, snapfile, …)             |
+| **Firecracker runtime** | `/orchestrator/sandboxes/<sbx_id>/`, `/tmp/fc-*.sock` | Live microVM state per running sandbox                                                     |
 
 The hive-backend layer (separate, in GCP k8s `staging` namespace) holds:
 
-| Table | What |
-|---|---|
-| `account_vm` | one row per team — state machine `running ⇄ paused → terminated`, points at one e2b sandbox |
-| `account_vm_event` | append-only audit of every state change |
-| `account_vm_pushed_colonies` | persistent "this colony routes to this team's VM" pin |
+| Table                        | What                                                                                        |
+| ---------------------------- | ------------------------------------------------------------------------------------------- |
+| `account_vm`                 | one row per team — state machine `running ⇄ paused → terminated`, points at one e2b sandbox |
+| `account_vm_event`           | append-only audit of every state change                                                     |
+| `account_vm_pushed_colonies` | persistent "this colony routes to this team's VM" pin                                       |
 
 ## Roles of the key entities
 
@@ -68,6 +69,7 @@ landed in MinIO, then write a `env_builds` + `env_build_assignments`
 row so the alias points at the new build.
 
 **Command:**
+
 ```bash
 cd ~/aden/infra/sandbox-images/hive-novnc
 
@@ -78,7 +80,7 @@ cd ~/aden/infra/sandbox-images/hive-novnc
 ./roll-template.sh -a hivev3-rc -t colonies-v18
 ```
 
-**Stages (~10–15 min total):**
+**Stages (~10-15 min total):**
 
 1. `sync-hive-src.sh` — rsync `~/aden/hive-desktop-runtime/` into
    `sandbox-images/hive-novnc/hive-src/`. Stamps `.hive-source-rev`.
@@ -87,8 +89,8 @@ cd ~/aden/infra/sandbox-images/hive-novnc
    sees the same `STORAGE_PROVIDER`, MinIO creds, registry creds).
 4. `sudo systemctl stop nomad` — orchestrator releases `:5007`.
 5. `create-build -to-build <new_uuid> -template <alias>
-   -fromImage 127.0.0.1:5000/hive-novnc:colonies-vN`. This is the
-   actual snapshot capture; runs ~5–10 min.
+-fromImage 127.0.0.1:5000/hive-novnc:colonies-vN`. This is the
+   actual snapshot capture; runs ~5-10 min.
 6. **Hard-fail verification:** check
    `/srv/minio/e2b-templates/<new_uuid>/` has all 6 files
    (memfile, memfile.header, metadata.json, rootfs.ext4,
@@ -96,20 +98,22 @@ cd ~/aden/infra/sandbox-images/hive-novnc
    alias stays pointed at the previous build.
 7. `sudo systemctl start nomad` — orchestrator returns.
 8. Postgres `INSERT INTO env_builds (...)` + `INSERT INTO
-   env_build_assignments (env_id, build_id, tag, source)`.
+env_build_assignments (env_id, build_id, tag, source)`.
 9. (Best-effort) verify via the e2b API at
    `https://api.vm.open-hive.com/templates`.
 
 **Sanity check** — re-run any time:
+
 ```bash
 ./roll-template.sh check -a hivev3-rc
 # → ✅ snapshot files present  (or which ones are missing)
 ```
 
 **When things fail mid-roll:**
+
 - Snapshot files missing → script aborts cleanly, alias is untouched.
   Inspect with `check`; rerun with `roll-template.sh -a hivev3-rc -t
-  <previous-tag>` if you want to retry against the same image.
+<previous-tag>` if you want to retry against the same image.
 - Nomad won't restart → `sudo journalctl -u nomad -f` and check
   `/etc/nomad/orchestrator.hcl`. The orchestrator alloc id is in the
   `nomad alloc status` output.
@@ -123,6 +127,7 @@ memory and only see the new build after pause+resume — which is what
 the staleness gate in [hive-backend cors-vm.service](../../hive-backend/src/services/sandbox/account-vm.service.ts) auto-handles.
 
 **Command — SSH into OVH and run psql:**
+
 ```bash
 ssh ubuntu@135.148.52.236 <<'EOF'
 PASS=$(sudo cat /proc/$(pgrep -f 'bin/api' | head -1)/environ 2>/dev/null \
@@ -141,6 +146,7 @@ EOF
 ```
 
 **Verify the alias now points at the new build:**
+
 ```bash
 ssh ubuntu@135.148.52.236 \
   "PASS=\$(sudo cat /proc/\$(pgrep -f 'bin/api' | head -1)/environ \
@@ -164,6 +170,7 @@ credentials, first tool call, no auth errors, …). Acceptance gate is
 13/13 PASS.
 
 **Setup:**
+
 ```bash
 # Stream token = per-user JWT for hive-llm. Minted from k8s hive-secrets.
 export HIVE_STREAM_TOKEN=$(~/aden/infra/scripts/mint-stream-token.sh)
@@ -173,6 +180,7 @@ export HIVE_E2B_TEMPLATE=hivev3-rc
 ```
 
 **Run:**
+
 ```bash
 cd ~/aden/infra/sandbox-images/hive-novnc
 
@@ -184,6 +192,7 @@ cd ~/aden/infra/sandbox-images/hive-novnc
 ```
 
 **Output:**
+
 - Live progress in stdout (push events, session creation, polling)
 - Final table: 13 rows of `dimension | local | remote | pass`
 - JSON report at `/tmp/parity-<ts>-<pid>/report.json`
@@ -193,6 +202,7 @@ cd ~/aden/infra/sandbox-images/hive-novnc
 template behaves equivalently to your local checkout when given the
 same colony. Any divergence is real and worth investigating before
 promotion. Common diffs:
+
 - skills_count mismatch → the candidate is missing a skill module
 - llm_provider mismatch → in-template `/api/config/llm` didn't apply
 - no_llm_auth_error=false → the in-template hive-llm bearer isn't
@@ -205,6 +215,7 @@ promotion. Common diffs:
 queens to the Rust `hive-llm` proxy as that user.
 
 **Command:**
+
 ```bash
 ~/aden/infra/scripts/mint-stream-token.sh
 # 24h TTL, default sub/team
@@ -218,6 +229,7 @@ HIVE_JWT_SECRET=... ~/aden/infra/scripts/mint-stream-token.sh
 ```
 
 **When you need it:**
+
 - Running `parity-test.sh` (export as `HIVE_STREAM_TOKEN`)
 - Manual debugging of a VM-side queen via curl
 
@@ -399,13 +411,14 @@ kubectl -n staging exec deploy/staging-hive-app -- node -e "
 ## 4.1 Roll fails partway
 
 **Symptom:** `roll-template.sh` exits non-zero somewhere between
-stages 4–6. Nomad is stopped, MinIO has partial files.
+stages 4-6. Nomad is stopped, MinIO has partial files.
 
 **Recovery:**
+
 1. `./roll-template.sh check -a <alias>` — does the new build_id
    have all 6 files in MinIO?
 2. If no → restart nomad manually (`ssh ubuntu@... 'sudo systemctl
-   start nomad'`), then re-run the roll with the same image tag
+start nomad'`), then re-run the roll with the same image tag
    (`./roll-template.sh -a <alias> -t <existing-tag>`).
 3. If yes but no postgres row → the script aborted between
    verification and INSERT. Manually `INSERT INTO env_builds` +
@@ -467,17 +480,18 @@ takes care of the latter automatically.
 
 ## 5.1 Scripts
 
-| Script | Purpose | Lives at |
-|---|---|---|
-| [`roll-template.sh`](../sandbox-images/hive-novnc/roll-template.sh) | End-to-end VM template build + register | `infra/sandbox-images/hive-novnc/` |
-| [`sync-hive-src.sh`](../sandbox-images/hive-novnc/sync-hive-src.sh) | rsync runtime → image build context | same |
-| [`parity-test.sh`](../sandbox-images/hive-novnc/parity-test.sh) + [`parity-test.py`](../sandbox-images/hive-novnc/parity-test.py) | 13-dimension local↔remote runtime parity test | same |
-| [`pack-and-policy.sh`](../sandbox-images/hive-novnc/pack-and-policy.sh) | In-image: pack the Chrome extension as `.crx` + write force-install policy | same (runs INSIDE the docker build, not on the host) |
-| [`mint-stream-token.sh`](../scripts/mint-stream-token.sh) | Sign a hive-llm stream JWT from k8s hive-secrets | `infra/scripts/` |
+| Script                                                                                                                            | Purpose                                                                    | Lives at                                             |
+| --------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- | ---------------------------------------------------- |
+| [`roll-template.sh`](../sandbox-images/hive-novnc/roll-template.sh)                                                               | End-to-end VM template build + register                                    | `infra/sandbox-images/hive-novnc/`                   |
+| [`sync-hive-src.sh`](../sandbox-images/hive-novnc/sync-hive-src.sh)                                                               | rsync runtime → image build context                                        | same                                                 |
+| [`parity-test.sh`](../sandbox-images/hive-novnc/parity-test.sh) + [`parity-test.py`](../sandbox-images/hive-novnc/parity-test.py) | 13-dimension local↔remote runtime parity test                              | same                                                 |
+| [`pack-and-policy.sh`](../sandbox-images/hive-novnc/pack-and-policy.sh)                                                           | In-image: pack the Chrome extension as `.crx` + write force-install policy | same (runs INSIDE the docker build, not on the host) |
+| [`mint-stream-token.sh`](../scripts/mint-stream-token.sh)                                                                         | Sign a hive-llm stream JWT from k8s hive-secrets                           | `infra/scripts/`                                     |
 
 ## 5.2 Postgres tables
 
 **e2b (on OVH host, db=`e2b`)**
+
 - `envs` — abstract templates
 - `env_aliases (alias, env_id)` — stable name → env
 - `env_builds (id, env_id, status, reason::jsonb, ...)` — snapshotted versions of each env
@@ -486,6 +500,7 @@ takes care of the latter automatically.
 - `team_api_keys` — service-team API keys (hashed)
 
 **hive-backend (in GCP k8s `staging` ns, db=Cloud SQL postgres)**
+
 - `account_vm (team_id PK, state, e2b_sandbox_id, e2b_paused_snapshot_id, e2b_template_id, spawn_metadata::jsonb, ...)` — one row per team
 - `account_vm_event (id, team_id, user_id, event_type, detail::jsonb, occurred_at)` — append-only audit log
 - `account_vm_pushed_colonies (team_id, colony_name, pushed_at, pushed_by_user_id)` — persistent colony→VM pins
@@ -529,17 +544,17 @@ takes care of the latter automatically.
 
 # 6. Quick reference: "I need to..."
 
-| Goal | Steps |
-|---|---|
-| Ship a new runtime to all teams | Roll into `hivev3-rc` (§1.1) → parity test (§1.3) → promote `hivev3` (§1.2) |
-| Verify a deployed template still works | `./parity-test.sh` against the active alias (§1.3) |
-| See what runtime version a team is on | Query `account_vm.spawn_metadata->>'e2b_build_id'` (§2.4) |
-| Free up a stale paused snapshot | Force-respawn the team's workspace (§3.2) |
-| Find out why a sandbox died | Recent `account_vm_event` rows for the team (§2.4) + `journalctl -u nomad` on OVH |
-| Roll back a bad promotion | INSERT the prior build_id as a new env_build_assignments row (§4.3) |
+| Goal                                             | Steps                                                                                           |
+| ------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| Ship a new runtime to all teams                  | Roll into `hivev3-rc` (§1.1) → parity test (§1.3) → promote `hivev3` (§1.2)                     |
+| Verify a deployed template still works           | `./parity-test.sh` against the active alias (§1.3)                                              |
+| See what runtime version a team is on            | Query `account_vm.spawn_metadata->>'e2b_build_id'` (§2.4)                                       |
+| Free up a stale paused snapshot                  | Force-respawn the team's workspace (§3.2)                                                       |
+| Find out why a sandbox died                      | Recent `account_vm_event` rows for the team (§2.4) + `journalctl -u nomad` on OVH               |
+| Roll back a bad promotion                        | INSERT the prior build_id as a new env_build_assignments row (§4.3)                             |
 | Update which colonies count as remote for a team | UPSERT/DELETE in `account_vm_pushed_colonies` (§2.4 query for inspection, §3.3 for full delete) |
-| Mint a JWT for manual e2b API calls | Use a team's `E2B_API_KEY` from k8s hive-secrets, not the stream token |
-| Mint a stream token for a VM-side queen | `mint-stream-token.sh` (§1.4) |
+| Mint a JWT for manual e2b API calls              | Use a team's `E2B_API_KEY` from k8s hive-secrets, not the stream token                          |
+| Mint a stream token for a VM-side queen          | `mint-stream-token.sh` (§1.4)                                                                   |
 
 ---
 
@@ -555,5 +570,5 @@ takes care of the latter automatically.
   Xvfb, Chrome managed policies, hive runtime supervised processes)
   are covered in
   [`sandbox-images/hive-novnc/supervisord.conf`](../sandbox-images/hive-novnc/supervisord.conf)
-  + the in-VM `/var/log/supervisor/*.log` files. Add a section here
-  the next time someone has to debug an in-VM issue from scratch.
+  - the in-VM `/var/log/supervisor/*.log` files. Add a section here
+    the next time someone has to debug an in-VM issue from scratch.
