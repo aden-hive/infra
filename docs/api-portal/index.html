@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Hive VM control · API portal</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="assets/styles.css" />
+</head>
+<body>
+<div class="layout">
+
+<aside>
+  <h1>Hive VM Control</h1>
+  <div class="sub">API portal &amp; runbooks</div>
+  <nav>
+    <a href="index.html" class="active">Overview</a>
+    <a href="dashboard.html">Dashboard</a>
+    <a href="api.html">API reference</a>
+    <a href="cli.html">CLI &amp; scripts</a>
+    <div class="nav-group">Source</div>
+    <a href="openapi.yaml" target="_blank">openapi.yaml</a>
+    <a href="https://github.com/anthropics/" target="_blank" rel="noopener">repo (internal)</a>
+  </nav>
+</aside>
+
+<main>
+  <h1>Hive VM control plane</h1>
+  <p class="intro">
+    Each hive team owns one Firecracker microVM on the OVH e2b cluster.
+    The VM bakes Chrome + Xvfb + the hive runtime under HIVE_HOME — it's
+    where the team's queens and colonies execute browser-automation tools
+    when "pinned to VM." This portal documents the control-plane API and
+    the CLI tooling that backs it.
+  </p>
+
+  <h2>The three layers</h2>
+  <div class="diagram">
+hive desktop                    hive-backend                      OVH e2b
+(electron)                      (Node + pg + Mongo)               (Firecracker, Caddy)
+┌──────────────┐  /v1/workspace ┌─────────────────┐ /sandboxes/*  ┌────────────────┐
+│ pushColony   │ ─────────────▶ │ account-vm.svc  │ ────────────▶ │ orchestrator   │
+│ unpinColony  │                │ • spawn / pause │               │ • build / kill │
+│ noVNC embed  │ ◀───────────── │ • event log     │ ◀──────────── │ • snapshots in │
+│ heartbeat    │                │ • account_vm    │               │   MinIO        │
+└──────────────┘                │ • pushed_col... │               └────────────────┘
+                                └─────────────────┘
+   ▲                                    │
+   │           per-user JWT for         │
+   │         hive-llm proxy auth        ▼
+┌──────────────┐                ┌─────────────────┐
+│ hive-llm     │ ◀───── verify  │ stream tokens   │
+│ (Rust proxy) │                │ (HS256)         │
+└──────────────┘                └─────────────────┘
+  </div>
+
+  <h2>Where things live</h2>
+  <table>
+    <thead><tr><th>Concept</th><th>Lives in</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>account_vm</code></td>
+        <td>hive-backend postgres</td>
+        <td>One row per team. State machine: running ⇄ paused → terminated.</td>
+      </tr>
+      <tr>
+        <td><code>account_vm_pushed_colonies</code></td>
+        <td>hive-backend postgres</td>
+        <td>Persistent colony→VM bindings. Survives desktop restart and VM pause.</td>
+      </tr>
+      <tr>
+        <td><code>account_vm_event</code></td>
+        <td>hive-backend postgres</td>
+        <td>Append-only audit log. Same tx as every state change.</td>
+      </tr>
+      <tr>
+        <td>Snapshot files</td>
+        <td>OVH MinIO <code>/srv/minio/e2b-templates/&lt;build_id&gt;/</code></td>
+        <td>6 files: memfile, memfile.header, metadata.json, rootfs.ext4, rootfs.ext4.header, snapfile.</td>
+      </tr>
+      <tr>
+        <td>VM template image</td>
+        <td>OVH local docker registry <code>127.0.0.1:5000/hive-novnc:colonies-v*</code></td>
+        <td>Built by <code>roll-template.sh</code> from <code>sandbox-images/hive-novnc/</code>.</td>
+      </tr>
+      <tr>
+        <td>Alias → build_id</td>
+        <td>e2b postgres <code>env_aliases</code> + <code>env_build_assignments</code></td>
+        <td>Most-recent assignment wins. Atomic alias-flip is the rollout primitive.</td>
+      </tr>
+      <tr>
+        <td>Embed token</td>
+        <td>HS256 JWT, signed in hive-backend, validated by client-proxy</td>
+        <td>10-min TTL. Carries sandbox_id; gates access to <code>8787-&lt;sid&gt;.vm.open-hive.com</code>.</td>
+      </tr>
+      <tr>
+        <td>Stream token</td>
+        <td>HS256 JWT, signed in hive-backend, validated by Rust <code>hive-llm</code></td>
+        <td>Same shape as <code>/v1/user/refresh-stream-token</code>. Used by VM-side queens.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>VM lifecycle</h2>
+  <div class="diagram">
+                       ┌───────────────────────────────────────┐
+                       │              account_vm.state         │
+                       └───────────────────────────────────────┘
+                            ╳                              ╳
+                            │                              │
+   /start (no row)          │       /start (paused)        │       /start (running)
+   spawnFresh ────────────▶ running ◀──────resume──── paused ◀─────────────────────┐
+                              │                          ▲                          │
+   /pause (user)              │                          │                          │
+   /pauseForIdle (sweep)      └──── pauseSandbox ────────┘                          │
+   /reconcileToPaused                                                               │
+                                                                                    │
+   /destroy (user)                                                                  │
+   /markExternalTerminated   running/paused ──── killSandbox + clearPins ────▶ terminated
+                                                                                    │
+                                                  /start spawns fresh ◀─────────────┘
+  </div>
+  <p>
+    The desktop never calls <code>/sandboxes/*</code> directly. It only
+    talks to <code>/v1/workspace/*</code> on hive-backend; the backend
+    proxies through to e2b. This indirection is what lets the desktop
+    survive e2b API drift (alias renames, endpoint reshapes) — and it's
+    where we add cross-cutting concerns like pin persistence and event
+    auditing.
+  </p>
+
+  <h2>Quick start (for teammates)</h2>
+  <div class="card">
+    <h3>1. Get a JWT</h3>
+    <p>
+      Sign into the desktop app. In DevTools (Ctrl+Shift+I) →
+      Application → Local Storage → look for <code>hive_jwt</code>
+      (the user session JWT, distinct from the stream token).
+      Alternatively, login via the API:
+    </p>
+    <pre>curl -sX POST https://app-staging.open-hive.com/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"you@team","password":"..."}' | jq -r .token</pre>
+  </div>
+
+  <div class="card">
+    <h3>2. Open the dashboard</h3>
+    <p>
+      Paste the JWT into <a href="dashboard.html">the Dashboard</a> and
+      you'll see your team's VM status, recent events, and one-click
+      buttons for start / pause / destroy and colony pin / unpin.
+    </p>
+  </div>
+
+  <div class="card">
+    <h3>3. Try the API directly</h3>
+    <p>
+      The <a href="api.html">API reference</a> embeds Scalar, which has
+      a built-in "Try it" panel. Set <code>Authorization: Bearer &lt;jwt&gt;</code>
+      in the request headers and fire requests against
+      <code>app-staging.open-hive.com</code>.
+    </p>
+  </div>
+
+  <div class="card">
+    <h3>4. Rolling templates / parity tests</h3>
+    <p>
+      Operational scripts (roll a new VM template, run parity tests
+      between local and remote runtime, mint stream tokens) live under
+      <code>infra/scripts/</code> and
+      <code>infra/sandbox-images/hive-novnc/</code>. The <a href="cli.html">CLI page</a>
+      documents each with copy-able invocations and what it actually does.
+    </p>
+  </div>
+
+  <h2>Glossary</h2>
+  <table>
+    <tbody>
+      <tr>
+        <td><strong>Workspace VM</strong></td>
+        <td>The team's single Firecracker microVM. Lives on OVH; embedded in the desktop via noVNC.</td>
+      </tr>
+      <tr>
+        <td><strong>Template</strong></td>
+        <td>The OCI image + Firecracker config used to spawn fresh VMs. Currently <code>hivev3</code>.</td>
+      </tr>
+      <tr>
+        <td><strong>Build</strong></td>
+        <td>A specific snapshot of a template, identified by UUID. <code>roll-template.sh</code> creates one; promotion is an alias→build pointer flip.</td>
+      </tr>
+      <tr>
+        <td><strong>Alias</strong></td>
+        <td>Stable name (e.g. <code>hivev3</code>) that maps to a build_id. New sandboxes spawn from whatever build the alias currently points at.</td>
+      </tr>
+      <tr>
+        <td><strong>Sandbox</strong></td>
+        <td>A running (or paused-and-snapshotted) instance of a build. The <code>sandboxID</code> appears in every embed URL.</td>
+      </tr>
+      <tr>
+        <td><strong>Snapshot</strong></td>
+        <td>Six files in MinIO that capture a paused sandbox's state. Resume rehydrates from these.</td>
+      </tr>
+      <tr>
+        <td><strong>Pinned colony</strong></td>
+        <td>A colony recorded in <code>account_vm_pushed_colonies</code>. Routing decision: chat for this colony goes to the VM, not local.</td>
+      </tr>
+      <tr>
+        <td><strong>Embed token</strong></td>
+        <td>Short-TTL JWT that proves "this user is allowed to reach sandbox X's noVNC + Hive API." Signed by hive-backend, validated by client-proxy.</td>
+      </tr>
+      <tr>
+        <td><strong>Stream token</strong></td>
+        <td>Per-user JWT for the Rust <code>hive-llm</code> proxy. Lets VM-side queens authenticate to hive-llm as the signed-in user.</td>
+      </tr>
+    </tbody>
+  </table>
+
+</main>
+</div>
+</body>
+</html>

@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Hive VM control · CLI &amp; scripts</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="assets/styles.css" />
+</head>
+<body>
+<div class="layout">
+
+<aside>
+  <h1>Hive VM Control</h1>
+  <div class="sub">API portal &amp; runbooks</div>
+  <nav>
+    <a href="index.html">Overview</a>
+    <a href="dashboard.html">Dashboard</a>
+    <a href="api.html">API reference</a>
+    <a href="cli.html" class="active">CLI &amp; scripts</a>
+    <div class="nav-group">Source</div>
+    <a href="openapi.yaml" target="_blank">openapi.yaml</a>
+  </nav>
+</aside>
+
+<main>
+  <h1>CLI &amp; scripts</h1>
+  <p class="intro">
+    Operational scripts in <code>infra/scripts/</code> and
+    <code>infra/sandbox-images/hive-novnc/</code>. Click any code block
+    to copy. Scripts assume you have SSH access to the OVH orchestrator
+    (<code>ubuntu@135.148.52.236</code>) and kubectl pointed at the
+    staging cluster.
+  </p>
+
+  <h2>Template rollout</h2>
+
+  <div class="endpoint-card">
+    <div class="endpoint-header">
+      <code>sandbox-images/hive-novnc/roll-template.sh</code>
+    </div>
+    <div class="endpoint-body">
+      <p>
+        End-to-end VM template roll. Syncs the hive runtime into the
+        image, builds a new docker tag in the OVH local registry,
+        snapshots a Firecracker VM from it via the orchestrator's
+        <code>create-build</code> binary, verifies the 6 snapshot files
+        landed in MinIO (or local storage, depending on
+        <code>STORAGE_PROVIDER</code>), then registers a new
+        <code>env_builds</code> + <code>env_build_assignments</code>
+        row in postgres so the alias points at the new build.
+      </p>
+      <h3>Common invocations</h3>
+      <pre>cd ~/aden/infra/sandbox-images/hive-novnc
+
+# Default: bump colonies-vN, build, register against alias `hivev3`
+./roll-template.sh
+
+# Explicit alias (preferred for staged rollouts)
+./roll-template.sh -a hivev3-rc
+
+# Use a pre-existing registry tag (don't rebuild)
+./roll-template.sh -t colonies-v17
+
+# Just verify the current state — no build, no DB writes
+./roll-template.sh check -a hivev3-rc</pre>
+      <h3>Stages it goes through</h3>
+      <table>
+        <tbody>
+          <tr><td>1</td><td>rsync <code>~/aden/hive-desktop-runtime/</code> → orchestrator <code>hive-src/</code>; stamp <code>.hive-source-rev</code></td></tr>
+          <tr><td>2</td><td>docker build + push to <code>127.0.0.1:5000/hive-novnc:colonies-vN</code></td></tr>
+          <tr><td>3</td><td>snapshot orchestrator env from <code>/proc/&lt;pid&gt;/environ</code> (so the build sees the same storage backend)</td></tr>
+          <tr><td>4</td><td><code>sudo systemctl stop nomad</code> — orchestrator releases :5007</td></tr>
+          <tr><td>5</td><td><code>create-build -to-build &lt;uuid&gt; -template &lt;alias&gt; -fromImage ...</code></td></tr>
+          <tr><td>6</td><td>verify all 6 files landed (memfile, memfile.header, metadata.json, rootfs.ext4, rootfs.ext4.header, snapfile)</td></tr>
+          <tr><td>7</td><td>start nomad</td></tr>
+          <tr><td>8</td><td><code>INSERT INTO env_builds</code> + <code>env_build_assignments</code></td></tr>
+          <tr><td>9</td><td>verify via e2b API: <code>GET https://api.vm.open-hive.com/templates</code></td></tr>
+        </tbody>
+      </table>
+      <div class="notice">
+        <strong>Stopping points.</strong> Snapshot verification HARD-FAILS
+        if files are missing — alias stays pointed at the previous build.
+        Inspect with <code>./roll-template.sh check -a &lt;alias&gt;</code>.
+      </div>
+    </div>
+  </div>
+
+  <div class="endpoint-card">
+    <div class="endpoint-header">
+      <code>sandbox-images/hive-novnc/sync-hive-src.sh</code>
+    </div>
+    <div class="endpoint-body">
+      <p>
+        Standalone helper that mirrors the runtime tree into the template
+        build context. Same exclusion list as
+        <code>hive-desktop/vendor/sync-hive.sh</code>. Stamps
+        <code>.hive-source-rev</code> and <code>.hive-source-branch</code>
+        so we can correlate a baked template back to the commit.
+      </p>
+      <pre># Default — pulls from $HOME/aden/hive-desktop-runtime
+bash sync-hive-src.sh
+
+# Override source path
+HIVE_SRC=/path/to/hive bash sync-hive-src.sh</pre>
+    </div>
+  </div>
+
+  <h2>Parity testing</h2>
+
+  <div class="endpoint-card">
+    <div class="endpoint-header">
+      <code>sandbox-images/hive-novnc/parity-test.sh [--colony &lt;name&gt;]</code>
+    </div>
+    <div class="endpoint-body">
+      <p>
+        Stages an isolated <code>$HIVE_HOME</code> + spawns a remote
+        sandbox of the configured template, pushes the same multi-root
+        colony tar to both, and compares 13 parity dimensions across
+        the local and remote runtime (queen id, phase, LLM provider,
+        skills list, credentials, first tool call, no auth errors,
+        …). Used to validate a rollout before promoting an alias.
+      </p>
+      <h3>Setup</h3>
+      <pre># Required env: a stream JWT (mint via scripts/mint-stream-token.sh)
+export HIVE_STREAM_TOKEN=$(~/aden/infra/scripts/mint-stream-token.sh)
+
+# Pin the candidate template alias
+export HIVE_E2B_TEMPLATE=hivev3-rc</pre>
+      <h3>Run</h3>
+      <pre># Default: bundled fixture under test-fixtures/parity_smoke
+./parity-test.sh
+
+# Explicit colony name (looks under ~/.hive/colonies/&lt;name&gt;)
+./parity-test.sh --colony twitter_engagement_2
+
+# Arbitrary colony path
+./parity-test.sh --colony /path/to/colony</pre>
+      <h3>What it produces</h3>
+      <table>
+        <tbody>
+          <tr>
+            <td><code>/tmp/parity-&lt;ts&gt;-&lt;pid&gt;/report.json</code></td>
+            <td><code>{overall_pass, dimensions: [{dimension, pass, local, remote, description}, …]}</code></td>
+          </tr>
+          <tr>
+            <td><code>/tmp/parity-&lt;ts&gt;-&lt;pid&gt;/stage/</code></td>
+            <td>The multi-root tar contents (colonies/ + agents/) for inspection</td>
+          </tr>
+        </tbody>
+      </table>
+      <p>
+        Acceptance gate is 13/13 PASS. The parity test ships with the
+        rollout — see <code>ROLLOUT-0.2.18.md</code> in the same dir.
+      </p>
+    </div>
+  </div>
+
+  <h2>Tokens &amp; auth</h2>
+
+  <div class="endpoint-card">
+    <div class="endpoint-header">
+      <code>scripts/mint-stream-token.sh</code>
+    </div>
+    <div class="endpoint-body">
+      <p>
+        Mints a per-user <strong>stream token</strong> JWT (HS256) — the
+        token the hive runtime and hive-llm proxy use for user auth
+        inside the VM. Different from the user session JWT used to call
+        <code>/v1/workspace/*</code>. Reads <code>JWT_SECRET</code> from
+        k8s <code>hive-secrets</code> via kubectl, or accepts
+        <code>$HIVE_JWT_SECRET</code> as override.
+      </p>
+      <pre># 24h TTL, default sub/team
+./scripts/mint-stream-token.sh
+
+# Different identity + team
+./scripts/mint-stream-token.sh \
+  --sub teammate@adenhq.com \
+  --team 14034
+
+# Shorter TTL
+./scripts/mint-stream-token.sh --ttl-hours 1
+
+# Override secret directly (skip kubectl)
+HIVE_JWT_SECRET=... ./scripts/mint-stream-token.sh
+
+# Override namespace
+./scripts/mint-stream-token.sh --namespace staging</pre>
+    </div>
+  </div>
+
+  <h2>Postgres pokes (operational)</h2>
+
+  <div class="endpoint-card">
+    <div class="endpoint-header">SSH-tunneled queries</div>
+    <div class="endpoint-body">
+      <p>
+        <code>account_vm</code>, <code>account_vm_event</code>, and
+        <code>account_vm_pushed_colonies</code> live in hive-backend's
+        Cloud SQL postgres. For ad-hoc reads/forensics, query directly.
+        The e2b internal state (<code>envs</code>,
+        <code>env_aliases</code>, <code>env_builds</code>) lives in a
+        SEPARATE postgres on the OVH host — only reachable via SSH.
+      </p>
+      <h3>e2b postgres on OVH</h3>
+      <pre># Resolve password from the live api process env
+ssh ubuntu@135.148.52.236 '
+  PASS=$(sudo cat /proc/$(pgrep -f "bin/api" | head -1)/environ 2>/dev/null \
+    | tr "\0" "\n" | grep "^POSTGRES_CONNECTION_STRING=" \
+    | sed "s|.*//e2b:||;s|@.*||")
+  PGPASSWORD=$PASS psql -h 127.0.0.1 -U e2b -d e2b -c "
+    SELECT ea.alias, eba.build_id, eba.created_at
+    FROM env_aliases ea
+    JOIN env_build_assignments eba ON eba.env_id = ea.env_id
+    WHERE ea.alias IN ('\''hivev3'\'','\''hivev3-rc'\'')
+    ORDER BY eba.created_at DESC LIMIT 6;"
+'</pre>
+      <h3>Live sandbox inventory</h3>
+      <pre>ssh ubuntu@135.148.52.236 \
+  'ps -ef | grep firecracker | grep -v grep \
+     | grep -oP "fc-\K[a-z0-9]+" | sort -u'</pre>
+      <h3>MinIO snapshot files for a build</h3>
+      <pre>ssh ubuntu@135.148.52.236 \
+  'sudo ls -la /srv/minio/e2b-templates/&lt;build_id&gt;/'</pre>
+    </div>
+  </div>
+
+  <h2>Runbooks</h2>
+
+  <div class="endpoint-card">
+    <div class="endpoint-header">In-repo runbooks</div>
+    <div class="endpoint-body">
+      <table>
+        <thead><tr><th>File</th><th>Covers</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><code>sandbox-images/hive-novnc/ROLLOUT-0.2.18.md</code></td>
+            <td>5-stage tag-based rollout (Stage 0 tag → Stage 4 promote → Stage 5 rollback)</td>
+          </tr>
+          <tr>
+            <td><code>sandbox-images/hive-novnc/RUNBOOK-3b-4-promotion.md</code></td>
+            <td>Manual smoke matrix + atomic alias flip + rollback SQL</td>
+          </tr>
+          <tr>
+            <td><code>sandbox-images/hive-novnc/TEMPLATE-UPDATE.md</code></td>
+            <td>How a single VM template update reaches end-users (9-step flow)</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</main>
+</div>
+
+<script>
+  // One-click copy for code blocks.
+  document.querySelectorAll("pre").forEach((pre) => {
+    pre.style.position = "relative";
+    const btn = document.createElement("button");
+    btn.textContent = "Copy";
+    btn.className = "copy-button";
+    btn.style.position = "absolute";
+    btn.style.top = "8px";
+    btn.style.right = "8px";
+    btn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(pre.innerText);
+        btn.textContent = "Copied";
+        btn.classList.add("copied");
+        setTimeout(() => { btn.textContent = "Copy"; btn.classList.remove("copied"); }, 1500);
+      } catch {
+        btn.textContent = "Failed";
+        setTimeout(() => { btn.textContent = "Copy"; }, 1500);
+      }
+    });
+    pre.appendChild(btn);
+  });
+</script>
+</body>
+</html>

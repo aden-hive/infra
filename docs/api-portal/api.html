@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Hive VM control · API reference</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="assets/styles.css" />
+<style>
+  /* Scalar runs inside its own iframe so its layout / theming / scroll
+   * doesn't fight with the portal's sidebar. The iframe takes the full
+   * available viewport height minus the topbar. */
+  main { padding: 0; max-width: none; }
+  .topbar {
+    padding: 12px 24px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+    color: var(--text-muted);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+  }
+  .topbar .actions { display: flex; gap: 8px; }
+  #scalar-frame {
+    width: 100%;
+    height: calc(100vh - 50px);
+    border: 0;
+    display: block;
+    background: var(--bg);
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+
+<aside>
+  <h1>Hive VM Control</h1>
+  <div class="sub">API portal &amp; runbooks</div>
+  <nav>
+    <a href="index.html">Overview</a>
+    <a href="dashboard.html">Dashboard</a>
+    <a href="api.html" class="active">API reference</a>
+    <a href="cli.html">CLI &amp; scripts</a>
+    <div class="nav-group">Source</div>
+    <a href="openapi.yaml" target="_blank">openapi.yaml</a>
+  </nav>
+</aside>
+
+<main>
+  <div class="topbar">
+    <span>
+      Interactive reference for <code>/v1/workspace/*</code>. Use the
+      <strong>Test Request</strong> panel to fire calls against staging —
+      paste your JWT into the <code>bearerAuth</code> auth field.
+    </span>
+    <span class="actions">
+      <a class="button" href="scalar.html" target="_blank">Full-screen</a>
+      <a class="button" href="openapi.yaml" target="_blank">Raw spec</a>
+    </span>
+  </div>
+  <iframe id="scalar-frame" src="scalar.html" title="Scalar API reference"></iframe>
+</main>
+</div>
+</body>
+</html>

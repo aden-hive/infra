@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Hive VM control · Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="assets/styles.css" />
+</head>
+<body>
+<div class="layout">
+
+<aside>
+  <h1>Hive VM Control</h1>
+  <div class="sub">API portal &amp; runbooks</div>
+  <nav>
+    <a href="index.html">Overview</a>
+    <a href="dashboard.html" class="active">Dashboard</a>
+    <a href="api.html">API reference</a>
+    <a href="cli.html">CLI &amp; scripts</a>
+    <div class="nav-group">Source</div>
+    <a href="openapi.yaml" target="_blank">openapi.yaml</a>
+  </nav>
+</aside>
+
+<main>
+  <h1>Dashboard</h1>
+  <p class="intro">
+    Live view of your team's workspace VM. All actions hit
+    <code>/v1/workspace/*</code> on hive-backend with your user JWT.
+    Token + base URL are saved to <code>localStorage</code>; click
+    <strong>Forget</strong> to wipe.
+  </p>
+
+  <div class="card">
+    <h3>Connection</h3>
+    <div class="grid">
+      <div>
+        <label for="base">Base URL</label>
+        <select id="base">
+          <option value="https://app.open-hive.com">production · app.open-hive.com</option>
+          <option value="https://app-staging.open-hive.com" selected>staging · app-staging.open-hive.com</option>
+          <option value="http://localhost:8889">local · localhost:8889</option>
+        </select>
+      </div>
+      <div>
+        <label for="jwt">User session JWT (Bearer)</label>
+        <input type="password" id="jwt" placeholder="ey..." autocomplete="off" />
+      </div>
+    </div>
+    <div class="row" style="margin-top: 12px;">
+      <button class="button primary" id="connect">Connect</button>
+      <button class="button" id="forget">Forget token</button>
+      <span class="dim" id="conn-status"></span>
+    </div>
+  </div>
+
+  <div id="workspace-card" class="card" style="display:none;">
+    <div class="row-between">
+      <div>
+        <h3 style="margin:0 0 4px;">Workspace</h3>
+        <div class="dim" style="font-family:monospace; font-size:12px;" id="sandbox-id">—</div>
+      </div>
+      <div class="row">
+        <span id="state-badge" class="badge unknown">unknown</span>
+        <button class="button" id="refresh">Refresh</button>
+      </div>
+    </div>
+
+    <div class="grid" style="margin-top: 16px;">
+      <dl class="kv">
+        <dt>vCPU</dt><dd id="vcpu">—</dd>
+        <dt>RAM (MB)</dt><dd id="ram">—</dd>
+        <dt>Last heartbeat</dt><dd id="last-hb">—</dd>
+      </dl>
+      <dl class="kv">
+        <dt>Last paused</dt><dd id="last-paused">—</dd>
+        <dt>Last resumed</dt><dd id="last-resumed">—</dd>
+        <dt>Embed expires</dt><dd id="expires">—</dd>
+      </dl>
+    </div>
+
+    <h3>Actions</h3>
+    <div class="row wrap">
+      <button class="button primary" id="act-start">Start / Resume</button>
+      <button class="button" id="act-heartbeat">Heartbeat</button>
+      <button class="button" id="act-pause">Pause</button>
+      <button class="button danger" id="act-destroy">Destroy</button>
+    </div>
+  </div>
+
+  <div id="vm-display-card" class="card" style="display:none;">
+    <div class="row-between">
+      <h3 style="margin:0;">VM display (noVNC)</h3>
+      <div class="row">
+        <span class="dim" id="vm-display-expires" style="font-size:11px; font-family: monospace;"></span>
+        <button class="button" id="vm-display-open">Open in new tab</button>
+        <button class="button" id="vm-display-toggle">Hide</button>
+      </div>
+    </div>
+    <p class="dim" style="font-size:12px; margin: 6px 0 12px;">
+      Live noVNC stream of the workspace VM, served through client-proxy
+      at <code>6080-&lt;sandboxId&gt;.vm.open-hive.com</code>. The embed
+      token has a 10-minute TTL — click <strong>Refresh</strong> in the
+      Workspace card above to mint a new one. If the iframe is blank,
+      try <strong>Open in new tab</strong> (some browsers / browser
+      extensions block third-party-host iframes).
+    </p>
+    <div id="vm-display-wrap" style="position:relative; background:#000; border-radius:6px; overflow:hidden; aspect-ratio: 16 / 10;">
+      <iframe
+        id="vm-display-iframe"
+        title="Workspace VM"
+        sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+        allow="clipboard-read; clipboard-write"
+        style="position:absolute; inset:0; width:100%; height:100%; border:0; background:#000;"
+      ></iframe>
+    </div>
+  </div>
+
+  <div id="colonies-card" class="card" style="display:none;">
+    <div class="row-between">
+      <h3 style="margin:0;">Pinned colonies</h3>
+      <span class="dim" id="colonies-count">0 pinned</span>
+    </div>
+    <p class="dim" style="font-size:12px; margin: 6px 0 12px;">
+      Persistent in <code>account_vm_pushed_colonies</code>. Pinning makes the
+      colony's chat route to the VM; unpinning flips routing back to local.
+      VM files stay in place either way — re-pinning is lossless.
+    </p>
+    <div id="colonies-list"></div>
+    <div class="row" style="margin-top: 12px;">
+      <input type="text" id="pin-name" placeholder="colony_name" />
+      <button class="button primary" id="act-pin">Pin</button>
+    </div>
+  </div>
+
+  <div id="events-card" class="card" style="display:none;">
+    <div class="row-between">
+      <h3 style="margin:0;">Recent events</h3>
+      <button class="button" id="events-refresh">Refresh</button>
+    </div>
+    <p class="dim" style="font-size:12px; margin: 6px 0 12px;">
+      From <code>account_vm_event</code>, newest first. Written in the same
+      transaction as every state change — the canonical audit trail.
+    </p>
+    <div id="events-list"></div>
+  </div>
+
+  <div id="log-card" class="card">
+    <h3>Request log</h3>
+    <p class="dim" style="font-size:12px;">
+      Every request fired from this dashboard. Useful for capturing repro
+      cases or copying as a <code>curl</code> command.
+    </p>
+    <div class="terminal" id="log"></div>
+  </div>
+
+</main>
+</div>
+
+<script src="assets/dashboard.js" defer></script>
+</body>
+</html>

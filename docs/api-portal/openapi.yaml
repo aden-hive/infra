@@ -1,0 +1,532 @@
+openapi: 3.1.0
+info:
+  title: Hive VM control plane
+  version: 1.0.0
+  description: |
+    REST API exposed by `hive-backend` for managing each team's singleton
+    workspace VM on the OVH e2b cluster. The hive desktop calls these
+    endpoints; the same surface is callable from any HTTP client with a
+    valid user session JWT.
+
+    **What's a "workspace VM"?** One Firecracker microVM per hive team,
+    spawned from the `hivev3` template on OVH (135.148.52.236). The VM
+    runs Chrome+Xvfb+noVNC+hive runtime — it's where the team's queens
+    and colonies execute their browser-automation tools when "pinned to
+    VM" instead of running locally.
+
+    **Lifecycle.** A team has exactly one row in postgres `account_vm`:
+    state ∈ {running, paused, terminated}. Idle-sweeper auto-pauses
+    after 5 min without heartbeat; resume rehydrates from MinIO
+    snapshot in ~1-3s. Destroy wipes all VM files.
+
+    **Colony pinning.** Pushing a colony to the VM copies its files via
+    `/api/colonies/import` AND records a pin in `account_vm_pushed_colonies`.
+    The pin is the source of truth for routing — the desktop reads it on
+    every status hydrate, so routing survives desktop restarts and VM
+    pauses. Unpinning is a routing-only flip; VM files stay in place.
+
+servers:
+  - url: https://app.open-hive.com
+    description: Production
+  - url: https://app-staging.open-hive.com
+    description: Staging
+  - url: http://localhost:8889
+    description: Local dev (npm run dev / scripts/dev.sh)
+
+tags:
+  - name: Workspace lifecycle
+    description: |
+      Spawn, pause, resume, destroy. Idempotent on the team's row —
+      concurrent `/start` calls from two users in the same team
+      converge on the same sandbox.
+  - name: Workspace status
+    description: |
+      Read-only status + audit trail. Status is safe to call frequently;
+      the desktop polls it on a 30s interval.
+  - name: Colony pinning
+    description: |
+      Persistent colony→VM bindings. Pin = "this colony is on the VM,
+      route chat traffic remote." Survives desktop restart and VM pause.
+
+security:
+  - bearerAuth: []
+
+paths:
+  /v1/workspace/start:
+    post:
+      tags: [Workspace lifecycle]
+      summary: Lazy-spawn-or-resume the team's workspace VM
+      description: |
+        Idempotent. Branches inside a row-lock so two concurrent
+        callers from the same team converge on one sandbox:
+
+        - **No row OR row.state='terminated'** → `spawnFresh` against
+          the configured template. Returns `action: "spawned"`.
+        - **row.state='paused'** → resume from snapshot. ~1-3s on
+          warm cache. Returns `action: "resumed"`.
+        - **row.state='running'** → probe e2b to confirm; if e2b
+          drifted to paused, resync the row and resume. Returns
+          `action: "already_running"` on the happy path.
+
+        Response includes a short-TTL embed payload (noVNC + Hive API
+        URLs through client-proxy) and a stream-token JWT the desktop
+        pushes into the VM for hive-llm auth.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartRequest'
+      responses:
+        '200':
+          description: Workspace is running; embed payload included
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StartResponse'
+        '403':
+          $ref: '#/components/responses/NoTeam'
+        '502':
+          $ref: '#/components/responses/ComputeUnavailable'
+
+  /v1/workspace:
+    get:
+      tags: [Workspace status]
+      summary: Read current status without mutating anything
+      description: |
+        Returns the row exactly as it is — does NOT resume a paused VM
+        or spawn a missing one. Use `/start` for those.
+
+        404 with `error: "workspace_not_initialized"` if the team has
+        never called `/start`. The desktop treats this as the "no
+        workspace yet" CTA state.
+
+        `pushedColonies` is always populated from the persisted
+        `account_vm_pushed_colonies` table — independent of VM state.
+        Even when state='paused' or state='terminated', the list of
+        previously-pinned colonies is returned so the desktop can
+        rehydrate routing.
+      responses:
+        '200':
+          description: Status row found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '404':
+          description: Team has never started a workspace
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: workspace_not_initialized
+                message: team has not started a workspace yet
+
+    delete:
+      tags: [Workspace lifecycle]
+      summary: Hard-destroy the workspace VM and wipe all pins
+      description: |
+        Kills the running/paused sandbox on e2b, marks the row
+        terminated, and atomically clears every colony pin for the
+        team. The next `/start` spawns fresh against the alias's
+        current build.
+
+        **Irrecoverable.** Workspace files (pushed colonies, browser
+        profiles, anything else under `/root/.hive`) are gone. Use
+        `/pause` for the lossless equivalent.
+      responses:
+        '204':
+          description: Destroyed
+        '403':
+          $ref: '#/components/responses/NoTeam'
+        '502':
+          $ref: '#/components/responses/ComputeUnavailable'
+
+  /v1/workspace/heartbeat:
+    post:
+      tags: [Workspace lifecycle]
+      summary: Keep-alive ping while the workspace browser is open
+      description: |
+        Desktop calls this every ~30s while the workspace BrowserView
+        is mounted. Updates `last_heartbeat_at` in postgres AND extends
+        the e2b sandbox TTL. Without a heartbeat for `E2B_IDLE_PAUSE_SEC`
+        (default 300s), the idle-sweeper auto-pauses the VM.
+
+        Returns 409 if the VM is not in `running` state — the desktop
+        treats this as "rebootstrap" and calls `/start`.
+      responses:
+        '204':
+          description: Heartbeat applied
+        '409':
+          description: Workspace not in running state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: workspace_not_running
+                message: workspace for team 14034 is in state 'paused', not 'running'
+
+  /v1/workspace/pause:
+    post:
+      tags: [Workspace lifecycle]
+      summary: Explicit user-initiated pause
+      description: |
+        Snapshots the VM via e2b's pause RPC and marks the row
+        `paused`. The snapshot lives in MinIO; resume rehydrates from
+        it. Lossless — colony files / browser state survive.
+
+        Idempotent: pausing an already-paused row is a no-op.
+      responses:
+        '200':
+          description: Paused (or was already paused)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  state:
+                    type: string
+                    enum: [paused]
+
+  /v1/workspace/events:
+    get:
+      tags: [Workspace status]
+      summary: Audit log for the team's workspace
+      description: |
+        Returns the most-recent events first. Events are written in
+        the same transaction as every state change, so this log is
+        always consistent with the canonical `account_vm` row.
+
+        Useful for debugging "why did my VM get paused/terminated"
+        questions, and for grafana queries (e.g. count
+        `terminate_external{detail.cause="stale_build"}` after a
+        runtime rollout).
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 500
+      responses:
+        '200':
+          description: Event list, newest-first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/WorkspaceEvent'
+
+  /v1/workspace/colonies:
+    post:
+      tags: [Colony pinning]
+      summary: Pin a colony to the workspace VM
+      description: |
+        Inserts (or upserts) a row in `account_vm_pushed_colonies`.
+        Records "this colony is on the VM" persistently — survives
+        desktop restart, VM pause, and reconciler activity.
+
+        The desktop calls this AFTER `/api/colonies/import` lands the
+        colony files on the VM. The two-step is atomic from the
+        desktop's perspective: if this fails, the desktop treats the
+        whole push as failed and reverts to local routing.
+
+        Idempotent — re-pinning the same colony bumps `pushed_at` and
+        updates `pushed_by_user_id`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [colony_name]
+              properties:
+                colony_name:
+                  type: string
+                  pattern: '^[a-z0-9_]+$'
+                  example: twitter_engagement_2
+      responses:
+        '204':
+          description: Pinned
+        '400':
+          description: Invalid colony name
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/workspace/colonies/{name}:
+    delete:
+      tags: [Colony pinning]
+      summary: Unpin a colony — route future chat back to local
+      description: |
+        Routing-only flip. Colony files stay on the VM; future
+        `/api/colonies/import` re-pushes are lossless.
+
+        Idempotent — returns 204 even if the colony wasn't pinned
+        (e.g. retry safety).
+
+        After unpinning, the desktop drops the in-process routing flag
+        and the colony-chat page re-bootstraps to a fresh local
+        session. Any in-flight VM session for this colony is
+        abandoned — surface this in the UI confirmation dialog.
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema:
+            type: string
+            pattern: '^[a-z0-9_]+$'
+      responses:
+        '204':
+          description: Unpinned (or was already not pinned)
+        '400':
+          description: Invalid colony name
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        User session JWT signed with `JWT_SECRET` (passport-jwt). Get
+        it via `/v1/auth/login` or copy from the desktop's `localStorage`
+        in DevTools. team_id is taken from the JWT's `current_team_id`
+        claim; if absent, every workspace endpoint returns 403.
+
+  schemas:
+    StartRequest:
+      type: object
+      description: All fields optional. Defaults come from hive-backend config.
+      properties:
+        template:
+          type: string
+          description: Override template alias or UUID. Default `hivev3`.
+          example: hivev3-rc
+        vcpu:
+          type: integer
+          minimum: 1
+          example: 2
+        ramMb:
+          type: integer
+          minimum: 256
+          example: 2560
+        timeoutS:
+          type: integer
+          description: Initial e2b sandbox TTL in seconds. Default 3600.
+          example: 3600
+
+    StartResponse:
+      type: object
+      required: [state, sandboxId, vcpu, ramMb, expiresAt, embed, action, pushedColonies, stream]
+      properties:
+        state:
+          type: string
+          enum: [running]
+        sandboxId:
+          type: string
+          example: ikq8ik4shanr9uqz74quy
+        vcpu:
+          type: integer
+        ramMb:
+          type: integer
+        expiresAt:
+          type: string
+          format: date-time
+        embed:
+          $ref: '#/components/schemas/EmbedConfig'
+        action:
+          type: string
+          enum: [spawned, resumed, already_running]
+          description: |
+            What the backend actually did. `spawned` = fresh VM,
+            `resumed` = restored from snapshot, `already_running` =
+            row was already in running state and e2b confirmed.
+        pushedColonies:
+          type: array
+          items:
+            type: string
+          description: Persistent colony pins for this team.
+        stream:
+          $ref: '#/components/schemas/StreamCredentials'
+
+    StatusResponse:
+      type: object
+      required: [state, sandboxId, vcpu, ramMb, lastHeartbeatAt, lastPausedAt, lastResumedAt, expiresAt, embed, pushedColonies, stream]
+      properties:
+        state:
+          type: string
+          enum: [running, paused, terminated]
+        sandboxId:
+          type: string
+          nullable: true
+        vcpu:
+          type: integer
+        ramMb:
+          type: integer
+        lastHeartbeatAt:
+          type: string
+          format: date-time
+        lastPausedAt:
+          type: string
+          format: date-time
+          nullable: true
+        lastResumedAt:
+          type: string
+          format: date-time
+          nullable: true
+        expiresAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Embed token expiry (state=running) or null
+        embed:
+          oneOf:
+            - $ref: '#/components/schemas/EmbedConfig'
+            - type: 'null'
+          description: Populated only when state=running
+        pushedColonies:
+          type: array
+          items:
+            type: string
+        stream:
+          $ref: '#/components/schemas/StreamCredentials'
+
+    EmbedConfig:
+      type: object
+      description: |
+        Short-TTL URLs routed through client-proxy to the per-team
+        sandbox. The desktop mounts the noVNC iframe and reaches the
+        hive runtime API via these URLs. Tokens are signed with
+        `E2B_EMBED_TOKEN_SECRET` (HS256), 10-min TTL by default.
+      required: [novnc, hiveApi]
+      properties:
+        novnc:
+          type: object
+          required: [kind, loadUrl, websocketUrl, expiresAt, dimensions]
+          properties:
+            kind:
+              type: string
+              enum: [iframe]
+            loadUrl:
+              type: string
+              format: uri
+            websocketUrl:
+              type: string
+            expiresAt:
+              type: string
+              format: date-time
+            dimensions:
+              type: object
+              properties:
+                width: { type: integer }
+                height: { type: integer }
+        hiveApi:
+          type: object
+          required: [kind, baseUrl, headers, expiresAt]
+          properties:
+            kind:
+              type: string
+              enum: [fetch]
+            baseUrl:
+              type: string
+              format: uri
+            headers:
+              type: object
+              additionalProperties:
+                type: string
+            expiresAt:
+              type: string
+              format: date-time
+
+    StreamCredentials:
+      type: object
+      description: |
+        Per-user JWT for the Rust `hive-llm` proxy. Same shape as
+        `/v1/user/refresh-stream-token` returns. The desktop pushes
+        this into the VM via `PUT /api/config/llm` so VM-side queens
+        authenticate as the signed-in user.
+      required: [streamToken, streamSid]
+      properties:
+        streamToken:
+          type: string
+        streamSid:
+          type: string
+
+    WorkspaceEvent:
+      type: object
+      required: [id, eventType, userId, detail, occurredAt]
+      properties:
+        id:
+          type: integer
+          format: int64
+        eventType:
+          type: string
+          enum:
+            - spawn
+            - resume
+            - heartbeat
+            - pause_idle
+            - pause_user
+            - terminate_user
+            - terminate_external
+            - error
+        userId:
+          type: integer
+          nullable: true
+          description: Caller user id; null for system-driven events (idle-sweeper, reconciler).
+        detail:
+          type: object
+          additionalProperties: true
+          description: |
+            Free-form JSON. Common keys:
+            - `cause` (`"stale_build"`, etc.) — drives Grafana queries
+            - `prior_sandbox_id`, `prior_snapshot`, `prior_state`
+            - `cleared_pins` — count of pins removed atomically with a destroy
+        occurredAt:
+          type: string
+          format: date-time
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Short machine-readable code (e.g. `workspace_not_running`).
+        message:
+          type: string
+          description: Human-readable explanation.
+        upstreamStatus:
+          type: integer
+          description: e2b HTTP status when proxying compute errors.
+
+  responses:
+    NoTeam:
+      description: JWT has no `current_team_id` claim
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: no_team
+            message: your account is not assigned to a team
+    ComputeUnavailable:
+      description: e2b returned an upstream error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: compute_unavailable
+            message: workspace compute backend returned an error
+            upstreamStatus: 503
