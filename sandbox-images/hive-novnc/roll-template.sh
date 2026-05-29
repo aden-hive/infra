@@ -123,13 +123,21 @@ verify_snapshot_in_storage() {
 
 # Stop nomad + force-kill orchestrator/api allocs and wait for :5007 to free.
 # Hard fails after 60s if the port is still bound.
+#
+# Footgun this avoids: `pkill -f "bin/api"` matches its own bash session
+# because the literal pattern "bin/api" appears in the ssh-exec'd shell's
+# argv — pkill ends up killing the SSH session itself (exit 255), and the
+# orphaned api/orchestrator survive. Kill by port-owner PID via `ss` instead.
 stop_orchestrator() {
-  ssh "$ORCH" '
+  ssh "$ORCH" bash -s <<'REMOTE'
     sudo systemctl stop nomad
     sleep 2
-    sudo pkill -KILL -f "nomad executor" 2>/dev/null || true
-    sudo pkill -KILL -f "bin/orchestrator" 2>/dev/null || true
-    sudo pkill -KILL -f "bin/api" 2>/dev/null || true
+    for port in 5007 3000; do
+      pid=$(sudo ss -tlnp 2>/dev/null | awk -v p=":$port " '$0 ~ p { match($0, /pid=([0-9]+)/, m); print m[1]; exit }')
+      if [[ -n "$pid" ]]; then
+        sudo kill -KILL "$pid" 2>/dev/null || true
+      fi
+    done
     for i in $(seq 1 30); do
       sleep 2
       if ! sudo ss -tlnp 2>/dev/null | grep -q ":5007 "; then
@@ -140,19 +148,23 @@ stop_orchestrator() {
     echo "!! :5007 still bound after 60s; refusing to continue" >&2
     sudo ss -tlnp | grep ":5007 " >&2
     exit 1
-  '
+REMOTE
 }
 
 # Restart nomad and poll until BOTH :5007 (orchestrator) and :3000 (api) are
 # bound. The previous version of this script returned as soon as :5007 came
 # back, even when api was still crash-looping.
+#
+# `ss` prints the program name AFTER the port (users:(("api",pid=...))), so
+# the old grep `orchestrator.*:5007 ` never matched. Match the program name
+# in the `users:(("name",...))` field instead.
 start_orchestrator() {
-  ssh "$ORCH" '
+  ssh "$ORCH" bash -s <<'REMOTE'
     sudo systemctl start nomad
     for i in $(seq 1 30); do
       sleep 2
-      orch=$(sudo ss -tlnp 2>/dev/null | grep -E "orchestrator.*:5007 " | head -1)
-      api=$(sudo ss -tlnp 2>/dev/null | grep -E "api.*:3000 " | head -1)
+      orch=$(sudo ss -tlnp 2>/dev/null | grep -E ':5007 .*"orchestrator"' | head -1)
+      api=$(sudo ss -tlnp 2>/dev/null | grep -E ':3000 .*"api"' | head -1)
       if [[ -n "$orch" && -n "$api" ]]; then
         echo "  orchestrator+api back after ${i} polls"
         exit 0
@@ -161,7 +173,7 @@ start_orchestrator() {
     echo "!! orchestrator (:5007) or api (:3000) not back after 60s" >&2
     sudo ss -tlnp 2>/dev/null | grep -E ":(5007|3000) " >&2
     exit 1
-  '
+REMOTE
 }
 
 # ── check subcommand ──────────────────────────────────────────────────
@@ -281,19 +293,22 @@ stop_orchestrator
 
 # ── 5. create-build → snapshot to whichever storage the orch uses ────
 echo "→ create-build → $NEW_BUILD_ID"
-# Pipe ENV_BLOB into a single ssh stdin so the env is set inside the
-# remote shell exactly as the orchestrator had it.
-ENV_ARGS=$(echo "$ENV_BLOB" | sed 's/^/    /')
+# Build env-arg block where EACH line ends with `\` so the whole thing
+# parses as a single backslash-continued command. The previous version
+# only put `\` after `env`, so only the first KEY=VAL reached create-build;
+# the rest became standalone shell-local assignments and create-build
+# panicked at storage.go:168 reading TEMPLATE_BUCKET_NAME.
+ENV_ARGS=$(echo "$ENV_BLOB" | sed 's|^|    |; s|$| \\|')
 ssh "$ORCH" "
   cd /home/${ORCH_USER}/infra/sandbox-images/hive-novnc
   sudo timeout 900 /usr/bin/env \\
-$ENV_ARGS \\
+$ENV_ARGS
     /home/${ORCH_USER}/infra/packages/orchestrator/bin/create-build \\
       -to-build $NEW_BUILD_ID \\
       -template $ALIAS \\
       -vcpu 2 -memory 2560 -disk 6144 \\
       -hugepages=false \\
-      -fromImage $IMAGE 2>&1 | tail -5
+      -fromImage $IMAGE 2>&1 | tail -40
 "
 
 # ── 6. verify snapshot is in the storage location the orch reads ─────
@@ -341,11 +356,11 @@ INSERT INTO env_builds (
 ) VALUES (
   '$NEW_BUILD_ID', NOW(), NOW(), NOW(),
   'uploaded', 2, 2560, 4096, 6144,
-  'vmlinux-6.1.158', 'v1.12.1_210cbac', \$ENV_ID, '0.1.0',
-  '$REASON_JSON'::jsonb, 'ready', \$TEAM_ID
+  'vmlinux-6.1.158', 'v1.12.1_210cbac', '\$ENV_ID', '0.1.0',
+  '$REASON_JSON'::jsonb, 'ready', '\$TEAM_ID'
 );
 INSERT INTO env_build_assignments (env_id, build_id, tag, source)
-VALUES (\$ENV_ID, '$NEW_BUILD_ID', 'default', 'app');
+VALUES ('\$ENV_ID', '$NEW_BUILD_ID', 'default', 'app');
 SQL
 "
 
