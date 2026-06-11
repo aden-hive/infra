@@ -299,6 +299,12 @@ echo "→ create-build → $NEW_BUILD_ID"
 # the rest became standalone shell-local assignments and create-build
 # panicked at storage.go:168 reading TEMPLATE_BUCKET_NAME.
 ENV_ARGS=$(echo "$ENV_BLOB" | sed 's|^|    |; s|$| \\|')
+# Ready-check: block the snapshot until `hive serve` binds 8787 so resumed
+# VMs already have it open. Default ready-cmd is `sleep 20`, which often
+# snapshots while hive is still in skill-loading → fresh spawns return
+# `502 The sandbox is running but port is not open` for the next ~60s.
+# We poll for up to 180s; the Go side caps at 10 min so this is well within.
+READY_CMD='for i in $(seq 1 180); do curl -sS --connect-timeout 1 http://127.0.0.1:8787/ -o /dev/null 2>&1 && exit 0; sleep 1; done; echo "hive serve never bound :8787" >&2; exit 1'
 ssh "$ORCH" "
   cd /home/${ORCH_USER}/infra/sandbox-images/hive-novnc
   sudo timeout 900 /usr/bin/env \\
@@ -308,6 +314,7 @@ $ENV_ARGS
       -template $ALIAS \\
       -vcpu 2 -memory 2560 -disk 6144 \\
       -hugepages=false \\
+      -ready-cmd '$READY_CMD' \\
       -fromImage $IMAGE 2>&1 | tail -40
 "
 

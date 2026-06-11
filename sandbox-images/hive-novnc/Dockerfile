@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       fuse3 iptables git nfs-common \
       xfwm4 xfce4-panel xfce4-terminal xfdesktop4 thunar xfce4-settings \
       tango-icon-theme adwaita-icon-theme \
+      zstd \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /etc/apt/keyrings \
@@ -66,6 +67,20 @@ RUN chmod +x /usr/local/bin/start-chrome.sh
 
 COPY hive-src /opt/hive
 WORKDIR /opt/hive
+
+# Per-user persistent-volume data plane. Two scripts that marshal
+# /root/.hive (= HIVE_HOME) to/from a signed S3 URL. The orchestrator
+# (or, for this RC, a manual envd Process.Start) invokes these on
+# Start/Stop so user state survives template upgrades.
+#
+# RC scope: just the in-VM data plane — no orchestrator/api/hive-backend
+# integration yet. Test by signing a URL with `mc share` on MinIO and
+# calling the script directly via envd.
+COPY hive-userdata-snapshot.sh /usr/local/bin/hive-userdata-snapshot.sh
+COPY hive-userdata-restore.sh  /usr/local/bin/hive-userdata-restore.sh
+RUN chmod +x /usr/local/bin/hive-userdata-snapshot.sh \
+             /usr/local/bin/hive-userdata-restore.sh
+
 # `--frozen` uses the exact lockfile resolution, so the build-time venv
 # matches what runtime would otherwise resolve. Without this, `uv run`
 # re-syncs at first call (Uninstalled X / Installed Y) and delays hive
@@ -75,9 +90,15 @@ RUN /usr/local/bin/uv sync --frozen 2>&1 | tail -10
 # at build time, not at first VM boot.
 RUN /opt/hive/.venv/bin/hive --help >/dev/null
 
-# Pre-seed /root/.hive/configuration.json so `hive serve` doesn't demand quickstart.
+# Pre-seed /root/.hive/configuration.json so `hive serve` doesn't demand
+# quickstart, and surface HIVE_HOME on the noVNC desktop as `Hive` so
+# users can browse queens/colonies/memories/sessions/secrets without
+# digging through a terminal. xfdesktop runs with HOME=/root (see
+# supervisord.conf), so the shortcut lives under /root/Desktop.
+# Earlier versions pointed this at /opt/hive (source code) — not useful.
 # The API key (KIMI_API_KEY) is NOT baked here; pass via docker run -e.
-RUN mkdir -p /root/.hive
+RUN mkdir -p /root/.hive /root/Desktop \
+    && ln -sfn /root/.hive /root/Desktop/Hive
 COPY hive-configuration.json /root/.hive/configuration.json
 
 EXPOSE 4001 6080 8787 9229 9230
