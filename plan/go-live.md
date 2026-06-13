@@ -164,7 +164,69 @@ sudo ufw allow 443/tcp comment 'caddy https'
 sudo ufw enable
 ```
 
+**MUST FOLLOW WITH:** allow per-veth ingress so the embedded NFS proxy
+(used by native persistent volumes) actually receives the rewritten
+packets. The orchestrator does iptables `PREROUTING REDIRECT` from each
+VM's 192.0.2.1:2049 to the host's `:5011` — the redirect leaves the
+packet on the `veth+` interface, where it hits the INPUT chain. With
+UFW's default DROP policy on INPUT, that packet is silently dropped and
+NFS mount inside the VM hangs.
+
+```bash
+# Persist in /etc/ufw/before.rules so it survives reboot. Insert
+# inside the filter table, after the ufw-before-input chain definition:
+sudo sed -i '/^-A ufw-before-input -i lo -j ACCEPT$/a -A ufw-before-input -i veth+ -j ACCEPT  # hive: per-veth ingress for embedded NFS proxy (REDIRECT to :5011)' /etc/ufw/before.rules
+# Also apply at runtime so we don't have to `ufw reload`:
+sudo iptables -I INPUT 1 -i veth+ -j ACCEPT
+```
+
+**AND:** disable reverse-path filtering globally + per-veth. The kernel's
+RPF default ("strict" / value `1`) drops the NFS proxy's reply packets
+because they leave on a different interface than they arrived on.
+
+```bash
+sudo tee /etc/sysctl.d/99-hive-nfsproxy.conf <<'EOF'
+# Hive native persistent volumes — embedded NFS proxy reply path lives
+# on a different interface than the incoming request, so strict RPF
+# drops legitimate traffic. Loose mode (2) is enough, but we use 0 for
+# defense-in-depth since the host has no exposed RPF-relevant route.
+net.ipv4.conf.all.rp_filter = 0
+net.ipv4.conf.default.rp_filter = 0
+EOF
+sudo sysctl --system
+# Existing veths aren't covered by `all` / `default` after they're
+# created — sweep them in one go:
+for f in /proc/sys/net/ipv4/conf/veth*/rp_filter; do echo 0 | sudo tee "$f" >/dev/null; done
+```
+
+**AND:** install a daily sweeper to expire the per-team volume soft-delete
+trash. The orchestrator's `DeleteVolume` RPC renames `<root>/team-<uuid>/vol-<uuid>`
+into `<root>/.trash/<unix-ts>-vol-<uuid>` instead of `RemoveAll`'ing,
+to give us a 30-day recovery window for accidental wipes. Without a
+sweeper the trash grows forever.
+
+```bash
+sudo tee /etc/cron.daily/hive-volume-trash-sweep <<'EOF'
+#!/bin/sh
+# Reap volume soft-deletes older than 30 days. The 30-day window
+# matches the user-facing language in the desktop app ("your storage
+# will be kept"); change both together if you change either.
+# Path mirrors PERSISTENT_VOLUME_MOUNTS=hivedata:/srv/hivedata in the
+# orchestrator nomad job.
+find /srv/hivedata/.trash -mindepth 1 -maxdepth 1 -mtime +30 -exec rm -rf {} +
+EOF
+sudo chmod +x /etc/cron.daily/hive-volume-trash-sweep
+```
+
 **Test from outside:** `nc -vz 135.148.52.236 8500` (Consul), `:9000` (MinIO), `:5432` (Postgres), `:6379` (Redis), `:3000` (orchestrator) — all should be filtered. Only `:80`, `:443`, `:22` open.
+
+**Test from inside a VM** (after these are applied):
+```bash
+# In a freshly-spawned sandbox netns
+findmnt /root/.hive   # must show: nfs from 192.0.2.1:/hivedata
+touch /root/.hive/post-cutover-probe
+# On orch host: file appears immediately under /srv/hivedata/team-*/vol-*/post-cutover-probe
+```
 
 ### 5. client-proxy embed-token verification (Go code)
 
