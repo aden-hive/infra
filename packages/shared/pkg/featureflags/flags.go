@@ -115,7 +115,13 @@ var (
 	// of synchronous. Only safe to enable after PeerToPeerChunkTransferFlag is ON.
 	PeerToPeerAsyncCheckpointFlag = newBoolFlag("peer-to-peer-async-checkpoint", false)
 
-	PersistentVolumesFlag            = newBoolFlag("can-use-persistent-volumes", env.IsDevelopment())
+	// Self-hosted note: default flipped to `true` because the OVH
+	// deployment has no LaunchDarkly client configured, so flags fall back
+	// to their hardcoded defaults. env.IsDevelopment() returns false in
+	// our prod-tagged dev env, which would gate /volumes off. Per-team
+	// persistent volumes are the only durable-storage path on this
+	// cluster (see hive-backend account-vm.service for the lifecycle).
+	PersistentVolumesFlag            = newBoolFlag("can-use-persistent-volumes", true)
 	ExecutionMetricsOnWebhooksFlag   = newBoolFlag("execution-metrics-on-webhooks", false) // TODO: Remove NLT 20250315
 	SandboxLabelBasedSchedulingFlag  = newBoolFlag("sandbox-label-based-scheduling", false)
 	OptimisticResourceAccountingFlag = newBoolFlag("sandbox-placement-optimistic-resource-accounting", false)

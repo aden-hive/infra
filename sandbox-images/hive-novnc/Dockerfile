@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       fuse3 iptables git nfs-common \
       xfwm4 xfce4-panel xfce4-terminal xfdesktop4 thunar xfce4-settings \
       tango-icon-theme adwaita-icon-theme \
+      mousepad nano vim-tiny xdg-utils \
       zstd \
     && rm -rf /var/lib/apt/lists/*
 

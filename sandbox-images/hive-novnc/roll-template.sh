@@ -363,7 +363,7 @@ INSERT INTO env_builds (
 ) VALUES (
   '$NEW_BUILD_ID', NOW(), NOW(), NOW(),
   'uploaded', 2, 2560, 4096, 6144,
-  'vmlinux-6.1.158', 'v1.12.1_210cbac', '\$ENV_ID', '0.1.0',
+  'vmlinux-6.1.158', 'v1.12.1_210cbac', '\$ENV_ID', '0.5.14',
   '$REASON_JSON'::jsonb, 'ready', '\$TEAM_ID'
 );
 INSERT INTO env_build_assignments (env_id, build_id, tag, source)
