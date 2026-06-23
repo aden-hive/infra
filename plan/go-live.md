@@ -228,6 +228,29 @@ touch /root/.hive/post-cutover-probe
 # On orch host: file appears immediately under /srv/hivedata/team-*/vol-*/post-cutover-probe
 ```
 
+**MUST FOLLOW WITH:** bump the e2b api's per-tier sandbox runtime cap.
+Upstream e2b ships `tiers.max_length_hours = 1` — a 1-hour hard cap on
+how long a single sandbox can run before the evictor pauses/kills it.
+That cap kicks in regardless of `refreshTimeout` calls (see
+`packages/api/internal/orchestrator/keep_alive.go:errMaxInstanceLengthExceeded`),
+so the workspace VM auto-pauses every hour even when the desktop is
+actively heart-beating it. For hive's per-team persistent VMs we want
+a 24-hour window.
+
+The migration `20260615000000_hive_bump_max_length_hours.sql` does this
+on first apply, but if you're upgrading an existing prod DB you can
+also do it inline:
+
+```bash
+ssh ubuntu@<orch> 'sudo -u postgres psql -d e2b \
+  -c "UPDATE tiers SET max_length_hours = 24 WHERE id = '"'"'base_v1'"'"';"'
+```
+
+Verify: `sudo -u postgres psql -d e2b -c "SELECT id,name,max_length_hours FROM tiers;"`
+should show 24 for `base_v1`. The bump takes effect on the NEXT
+spawn/resume — existing in-flight sandboxes keep the cap they were
+admitted under.
+
 ### 5. client-proxy embed-token verification (Go code)
 
 The `?access_token=…` JWT is already minted by hive-backend (HS256, signed with `E2B_EMBED_TOKEN_SECRET`, claims `sub`, `teamId`, `sandboxId`, `kind="hive-workspace-embed"`, `exp`). client-proxy currently routes by host-header without checking it.

@@ -39,6 +39,7 @@ import (
 	nfscfg "github.com/e2b-dev/infra/packages/orchestrator/pkg/nfsproxy/cfg"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/portmap"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/proxy"
+	"github.com/e2b-dev/infra/packages/orchestrator/pkg/reaper"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox"
 	blockmetrics "github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/block/metrics"
 	"github.com/e2b-dev/infra/packages/orchestrator/pkg/sandbox/cgroup"
@@ -345,6 +346,24 @@ func run(config cfg.Config, opts Options) (success bool) {
 	}
 
 	var closers []closer
+
+	// Reap orphan firecracker processes from prior orchestrator
+	// instances BEFORE accepting any sandbox-creation requests. The
+	// orchestrator holds sandbox state purely in-memory; every restart
+	// (template roll, panic, OOM, nomad kill) starts with an empty map.
+	// Firecracker processes spawned by the prior orchestrator survive
+	// via `ip netns exec` reparenting and keep pinning a host vCPU at
+	// ~100% indefinitely. See pkg/reaper for the full rationale.
+	//
+	// No-op unless REAP_ORPHAN_FIRECRACKERS_ON_BOOT="true" — gated for
+	// upstream's multi-orchestrator-per-node setups where instances
+	// share /tmp and shouldn't blindly kill each other's sandboxes.
+	if _, err := reaper.ReapOrphanFirecrackers(ctx, os.TempDir()); err != nil {
+		// Failing the reap shouldn't block the orchestrator from
+		// starting — the leak gets worse without it, but a broken
+		// orchestrator is worse than a leaky one.
+		logger.L().Warn(ctx, "orphan firecracker reaper failed; continuing startup", zap.Error(err))
+	}
 
 	// The sandbox map is shared between the server and the proxy
 	// to propagate information about sandbox routing.

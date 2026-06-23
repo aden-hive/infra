@@ -246,6 +246,24 @@ var nfsOptions = strings.Join([]string{
 	"nfsvers=3",      // nfs proxy is nfs version 3
 	"noacl",          // no reason for acl in the sandbox
 
+	// Handle POSIX file locks (fcntl F_SETLK, flock) IN-KERNEL inside
+	// the VM instead of routing them out via NLM (Network Lock Manager,
+	// RPC proto 100021) to the server. The orchestrator's embedded NFS
+	// proxy implements only the data plane (proto 100003) — it has no
+	// NLM service. Without `nolock`, any lock acquisition (e.g. SQLite
+	// holding fcntl on tracker.db inside hive serve) sends an NLM RPC
+	// to a port nothing is listening on and blocks forever in
+	// nlmclnt_lock → rpc_wait_bit_killable. The hive serve async loop
+	// runs on the same thread as the blocked RPC; the TCP listen
+	// backlog at :8787 overflows, the desktop sees "fetch failed".
+	//
+	// Safe here because each volume is bound 1:1 to a single team and
+	// only one VM mounts it at a time (enforced by hive-backend's
+	// withTeamLock + getOrStart returning the existing embed when a
+	// sandbox is already running for the team). No cross-VM lock
+	// coordination needed.
+	"nolock",
+
 	// disable caching so that pause/resume works correctly
 	"noac",
 	"lookupcache=none",
@@ -328,8 +346,25 @@ func (a *API) unmountNFS(ctx context.Context, logger zerolog.Logger, path string
 
 	logger.Debug().Msgf("Unmounting stale NFS mount at %q (was: %s)", path, source)
 
-	// Force unmount since the handles are stale anyway
-	data, err = exec.CommandContext(ctx, "umount", "--force", path).CombinedOutput()
+	// Force + lazy unmount. `--force` alone is documented for NFS where
+	// the server is unreachable, but it still fails synchronously when
+	// the kernel has a frozen mount entry whose handle was captured in
+	// a paused-VM memory snapshot — the typical state on resume. The
+	// mount's TCP socket is dead from the orchestrator's NFS proxy
+	// perspective, but the in-kernel mount table still holds a
+	// reference, and `umount --force` returns EBUSY/EAGAIN. Adding
+	// `--lazy` detaches the filesystem from the namespace immediately
+	// and lets the kernel reclaim the stale references in the
+	// background, which is exactly what we want before mountNFS
+	// re-attaches a fresh handle on the same path.
+	//
+	// Without -fl, every pause/resume cycle for a volume-mounted sandbox
+	// returns HTTP 400 from PostInit and the e2b orchestrator surfaces
+	// it as 500 to api callers — see infra/packages/api/internal/
+	// orchestrator/keep_alive.go path. The end-user symptom is
+	// "Resume" → spinner → "internal_error" forever, with no recovery
+	// short of a fresh spawn.
+	data, err = exec.CommandContext(ctx, "umount", "-fl", path).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to unmount stale NFS mount at %q: %w\n%s", path, err, string(data))
 	}

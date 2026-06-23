@@ -119,6 +119,21 @@ EOT
         ENVIRONMENT            = "prod"
         GRPC_PORT              = "${NOMAD_PORT_grpc}"
         PROXY_PORT             = "${NOMAD_PORT_proxy}"
+
+        // On boot, SIGKILL every firecracker process on the host. The
+        // orchestrator's sandbox state is held in memory only (no
+        // persistence across restarts), so anything still running after
+        // a restart is orphaned — its lifecycle has no owner, the
+        // SIGTERM→10s→SIGKILL goroutine in pkg/sandbox/fc/process.go
+        // died with the prior orch instance, and the firecracker is
+        // happily spinning a host vCPU at 100% with no way to manage
+        // it. Without the reaper, every template roll (which restarts
+        // nomad + orchestrator) leaks any in-flight sandbox until the
+        // host saturates. See pkg/reaper for the full incident report.
+        //
+        // Safe for hive's single-orch-per-node deployment. Upstream
+        // multi-orch setups should leave this unset (default off).
+        REAP_ORPHAN_FIRECRACKERS_ON_BOOT = "true"
         // Host-shared firewall/hyperloop/egress-proxy ports make running
         // orchestrator and template-manager as separate processes on the
         // same box collide. On single-host we co-locate both services in
