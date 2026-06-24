@@ -14,18 +14,24 @@
 #   1. rsync sandbox-images/hive-novnc/ from this checkout → orchestrator host
 #   2. docker build + push to local registry as hive-novnc:<TAG>
 #   3. snapshot the *running* orchestrator's env vars (storage / registry / paths)
-#   4. stop nomad-managed orchestrator + api long enough to free port 5007
-#   5. orchestrator/bin/create-build with the orchestrator's exact env →
+#   4. orchestrator/bin/create-build with the orchestrator's env BUT every
+#      sandbox-network port shifted by +100 (so create-build's listeners and
+#      iptables-redirect targets don't collide with the live orch's). →
 #      Firecracker rootfs+memfile snapshot (lands in MinIO when STORAGE_PROVIDER=AWSBucket)
-#   6. probe the snapshot's storage destination — every expected file present?
-#   7. restart nomad → wait for both orchestrator (:5007) and api (:3000)
-#   8. INSERT into postgres env_builds + env_build_assignments → new build active
+#   5. probe the snapshot's storage destination — every expected file present?
+#   6. INSERT into postgres env_builds + env_build_assignments → new build active
 #      (with source_rev / image_tag stamped into env_builds.reason for forensics)
-#   9. probe e2b API to confirm alias→buildID has flipped
+#   7. probe e2b API to confirm alias→buildID has flipped
+#
+# Notably absent (and intentional): no nomad stop / orchestrator kill. The live
+# orchestrator + api keep running the entire time. Any sandboxes the user has
+# in flight are unaffected — no SIGTERM cascade, no firecracker reap, no
+# blink. The trade-off is one new failure mode: if create-build crashes
+# mid-run, it might leave leaked iptables rules in chains on its shifted
+# port range (5110-5118). The boot-time orphan reaper handles the firecracker
+# cleanup; the iptables leak is at worst cosmetic until the next reboot.
 #
 # Footguns this script handles for you:
-#   - cmd/create-build/main.go:51 hardcodes proxyPort=5007. Nomad respawns the
-#     orchestrator on any kill; we stop the agent itself + force-kill executors.
 #   - create-build does NOT register the build with the e2b API. Postgres
 #     `env_build_assignments` is what the alias resolution reads.
 #   - The orchestrator runs with STORAGE_PROVIDER=AWSBucket+minio in production;
@@ -73,8 +79,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # wrapping into `env $(...)` further down. If no orchestrator is running,
 # returns nothing (caller handles).
 snapshot_orchestrator_env() {
+  # Use -x (exact match against the basename) + filter to only commands
+  # whose first arg IS the orchestrator binary path. Otherwise the bash
+  # subshell running this SSH heredoc itself matches `-f bin/orchestrator`
+  # — pgrep then picks the bash by PID order, sudo cat returns bash's
+  # env (no STORAGE_PROVIDER), grep returns 1, pipefail trips set -e in
+  # the caller, script aborts silently with no useful error. Caused
+  # every "exit 1" roll-fail today.
   ssh "$ORCH" '
-    PID=$(pgrep -f "bin/orchestrator" | head -1)
+    PID=$(pgrep -x orchestrator | head -1)
     [[ -z "$PID" ]] && exit 0
     sudo cat /proc/$PID/environ 2>/dev/null | tr "\0" "\n" | grep -E "^(STORAGE_PROVIDER|TEMPLATE_BUCKET_NAME|BUILD_CACHE_BUCKET_NAME|AWS_ENDPOINT_URL_S3|AWS_REGION|AWS_S3_USE_PATH_STYLE|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|ARTIFACTS_REGISTRY_PROVIDER|DOCKERHUB_REMOTE_REPOSITORY_PROVIDER|DOCKERHUB_REMOTE_REPOSITORY_URL|REGISTRY_DOCKER_REPOSITORY_NAME|HOST_BUSYBOX_DIR|HOST_KERNELS_DIR|FIRECRACKER_VERSIONS_DIR|HOST_ENVD_PATH|ENVIRONMENT|USE_LOCAL_NAMESPACE_STORAGE|LOCAL_TEMPLATE_STORAGE_BASE_PATH|LOCAL_BUILD_CACHE_STORAGE_BASE_PATH|NODE_IP)="
   '
@@ -121,14 +134,38 @@ verify_snapshot_in_storage() {
   esac
 }
 
-# Stop nomad + force-kill orchestrator/api allocs and wait for :5007 to free.
-# Hard fails after 60s if the port is still bound.
-#
-# Footgun this avoids: `pkill -f "bin/api"` matches its own bash session
-# because the literal pattern "bin/api" appears in the ssh-exec'd shell's
-# argv — pkill ends up killing the SSH session itself (exit 255), and the
-# orphaned api/orchestrator survive. Kill by port-owner PID via `ss` instead.
-stop_orchestrator() {
+# Verify the live orchestrator + api are both healthy BEFORE we run
+# create-build alongside them. If they aren't running, fall back to the
+# legacy stop-nomad behavior (which is then necessary, because create-build
+# can no longer rely on an existing namespace pool / NFS proxy etc).
+verify_orchestrator_running() {
+  ssh "$ORCH" bash -s <<'REMOTE'
+    orch=$(sudo ss -tlnp 2>/dev/null | grep -E ':5007 .*"orchestrator"' | head -1)
+    api=$(sudo ss -tlnp 2>/dev/null | grep -E ':3000 .*"api"' | head -1)
+    if [[ -z "$orch" || -z "$api" ]]; then
+      echo "(orchestrator or api NOT running; co-resident build cannot proceed)" >&2
+      exit 1
+    fi
+    # Also verify our shifted ports (5107-5118) are FREE — they're the
+    # listeners create-build will bind. A collision means a prior
+    # create-build crashed without cleanup; either kill it or pick a
+    # different shift.
+    for port in 5107 5110 5111 5112 5116 5117 5118; do
+      if sudo ss -tlnp 2>/dev/null | grep -q ":$port "; then
+        echo "!! shifted port :$port already bound — leftover from a prior crashed create-build?" >&2
+        sudo ss -tlnp | grep ":$port " >&2
+        exit 1
+      fi
+    done
+    echo "(orchestrator + api healthy; shifted ports free)"
+REMOTE
+}
+
+# Legacy stop/start kept for emergency rollback — currently unused. If you
+# need to fall back to the disruptive behavior (e.g. you found a bug in the
+# co-resident path), wrap the create-build call in stop_orchestrator /
+# start_orchestrator the way the script did before this change.
+_legacy_stop_orchestrator() {
   ssh "$ORCH" bash -s <<'REMOTE'
     sudo systemctl stop nomad
     sleep 2
@@ -151,14 +188,7 @@ stop_orchestrator() {
 REMOTE
 }
 
-# Restart nomad and poll until BOTH :5007 (orchestrator) and :3000 (api) are
-# bound. The previous version of this script returned as soon as :5007 came
-# back, even when api was still crash-looping.
-#
-# `ss` prints the program name AFTER the port (users:(("api",pid=...))), so
-# the old grep `orchestrator.*:5007 ` never matched. Match the program name
-# in the `users:(("name",...))` field instead.
-start_orchestrator() {
+_legacy_start_orchestrator() {
   ssh "$ORCH" bash -s <<'REMOTE'
     sudo systemctl start nomad
     for i in $(seq 1 30); do
@@ -287,18 +317,35 @@ ENV_PROVIDER=$(echo "$ENV_BLOB" | grep '^STORAGE_PROVIDER=' | cut -d= -f2-)
 echo "  STORAGE_PROVIDER=${ENV_PROVIDER}"
 echo "  $(echo "$ENV_BLOB" | wc -l) env vars captured"
 
-# ── 4. stop nomad → free :5007 ───────────────────────────────────────
-echo "→ stopping nomad agent + orchestrator alloc"
-stop_orchestrator
+# ── 4. verify co-resident build is safe → orch + api healthy, ports free ──
+echo "→ verifying live orchestrator + api are healthy, shifted ports free"
+verify_orchestrator_running
 
 # ── 5. create-build → snapshot to whichever storage the orch uses ────
-echo "→ create-build → $NEW_BUILD_ID"
+echo "→ create-build → $NEW_BUILD_ID  (running co-resident with live orch on shifted ports 5107-5118)"
 # Build env-arg block where EACH line ends with `\` so the whole thing
 # parses as a single backslash-continued command. The previous version
 # only put `\` after `env`, so only the first KEY=VAL reached create-build;
 # the rest became standalone shell-local assignments and create-build
 # panicked at storage.go:168 reading TEMPLATE_BUCKET_NAME.
-ENV_ARGS=$(echo "$ENV_BLOB" | sed 's|^|    |; s|$| \\|')
+#
+# Shift every sandbox-network port by +100 so create-build's listeners
+# (sandbox proxy, NFS proxy, portmapper, hyperloop, tcp firewall) don't
+# collide with the live orch's. The build's VM has its veth iptables
+# REDIRECT rules generated by network.go using these env-supplied ports,
+# so the build's envd talks to create-build's NFS proxy on :5111 — not
+# the orch's :5011 — and never sees /srv/hivedata (correctly, since the
+# build is template-prep, not a user sandbox).
+SHIFTED_PORT_ENV=$(cat <<'PORTS'
+SANDBOX_HYPERLOOP_PROXY_PORT=5110
+SANDBOX_NFS_PROXY_PORT=5111
+SANDBOX_PORTMAPPER_PORT=5112
+SANDBOX_TCP_FIREWALL_HTTP_PORT=5116
+SANDBOX_TCP_FIREWALL_TLS_PORT=5117
+SANDBOX_TCP_FIREWALL_OTHER_PORT=5118
+PORTS
+)
+ENV_ARGS=$(printf "%s\n%s" "$ENV_BLOB" "$SHIFTED_PORT_ENV" | sed 's|^|    |; s|$| \\|')
 # Ready-check: block the snapshot until `hive serve` binds 8787 so resumed
 # VMs already have it open. Default ready-cmd is `sleep 20`, which often
 # snapshots while hive is still in skill-loading → fresh spawns return
@@ -312,8 +359,9 @@ $ENV_ARGS
     /home/${ORCH_USER}/infra/packages/orchestrator/bin/create-build \\
       -to-build $NEW_BUILD_ID \\
       -template $ALIAS \\
-      -vcpu 2 -memory 2560 -disk 6144 \\
+      -vcpu 2 -memory 4096 -disk 6144 \\
       -hugepages=false \\
+      -proxy-port 5107 \\
       -ready-cmd '$READY_CMD' \\
       -fromImage $IMAGE 2>&1 | tail -40
 "
@@ -324,15 +372,25 @@ if ! verify_snapshot_in_storage "$NEW_BUILD_ID" "$ENV_BLOB"; then
   echo "!! snapshot verification FAILED — refusing to flip the alias." >&2
   echo "   alias '$ALIAS' still points at the previous build_id." >&2
   echo "   Inspect the broken build with: ./roll-template.sh check -a $ALIAS" >&2
-  echo "   Restarting nomad to bring the cluster back up." >&2
-  start_orchestrator || true
+  echo "   (live orch + api were not touched; cluster is still up)" >&2
   exit 1
 fi
 echo "  ✓ all six expected files present"
 
-# ── 7. restart nomad ─────────────────────────────────────────────────
-echo "→ restart nomad"
-start_orchestrator
+# ── 7. (no-op) live orchestrator + api were never stopped ────────────
+# Old version: stopped nomad in step 4, restarted here. New version: the
+# build ran co-resident with the live orch the whole time. Nothing to
+# bring back up.
+#
+# HOWEVER: e2b's template cache caches env_build rows by env_id in the
+# api process's memory. New `env_build_assignments` rows we INSERT below
+# in step 8 are NOT visible until the cache evicts (TTL ~1m). For a fresh
+# roll to be picked up immediately by /sandboxes calls, we'd nudge the
+# api job. For now we just trust the cache TTL — the seamless mode means
+# the user's existing sandbox keeps working on the prior build, and the
+# next spawn within ~1m gets the new build. If you need instant switch,
+# do `NOMAD_TOKEN=… nomad alloc restart -task api <alloc>` after step 8.
+echo "→ (skip restart — orchestrator + api stayed up the whole time)"
 
 # ── 8. register build → make it the active build for the alias ───────
 # Stamps source_rev / source_branch / image_tag into env_builds.reason
@@ -362,7 +420,7 @@ INSERT INTO env_builds (
   reason, status_group, team_id
 ) VALUES (
   '$NEW_BUILD_ID', NOW(), NOW(), NOW(),
-  'uploaded', 2, 2560, 4096, 6144,
+  'uploaded', 2, 4096, 4096, 6144,
   'vmlinux-6.1.158', 'v1.12.1_210cbac', '\$ENV_ID', '0.5.14',
   '$REASON_JSON'::jsonb, 'ready', '\$TEAM_ID'
 );

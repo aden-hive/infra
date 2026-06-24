@@ -23,7 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       fuse3 iptables git nfs-common \
       xfwm4 xfce4-panel xfce4-terminal xfdesktop4 thunar xfce4-settings \
       tango-icon-theme adwaita-icon-theme papirus-icon-theme \
-      gnome-themes-extra greybird-gtk-theme \
+      gnome-themes-extra greybird-gtk-theme librsvg2-bin \
       fonts-inter fonts-jetbrains-mono fonts-firacode \
       mousepad nano vim-tiny xdg-utils \
       zstd \
@@ -42,6 +42,37 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin s
 RUN useradd -m -u 1001 -s /bin/bash hive \
     && mkdir -p /data/chrome /var/log/supervisor \
     && chown -R hive:hive /home/hive /data
+
+# Prune the stock /etc/xdg/xfce4/panel/default.xml panel layout BEFORE
+# any session boots. The default ships:
+#   panel-1 (top bar):  plugin-ids = 1..14
+#     plugin-14 = actions  ← renders a "root" username + power dropdown
+#                            badge in the top-right. Useless in a cloud
+#                            sandbox (can't power-cycle the VM from
+#                            inside, and the username is always "root").
+#   panel-2 (bottom dock): plugin-ids = 15..22
+#     plugin-15 = showdesktop  ← blue filled rectangle, no useful
+#                                action in a cloud workstation.
+#     plugin-20 = launcher with items[] = empty array ← shows as a
+#                                blue gear placeholder, clicking does
+#                                nothing.
+#
+# Deleting the value lines from the plugin-ids arrays leaves the
+# remaining plugins in place. Each numeric value appears in exactly one
+# plugin-ids context (1-14 only in panel-1's, 15-22 only in panel-2's),
+# so the sed delete-by-exact-value-text is safe scoping. The per-plugin
+# definitions under <property name="plugins"> stay in the xml as dead
+# config; xfce4-panel just doesn't render them because they're not in
+# any panel's plugin-ids array.
+#
+# Previous attempt: edit the runtime xfconf channel via xfconf-query at
+# session-time. That scrambled the panel state catastrophically when
+# panel restart raced the xfconfd persistence layer. Editing the xdg
+# template at build time avoids the race entirely.
+RUN sed -i '\|<value type="int" value="14"/>|d; \
+            \|<value type="int" value="15"/>|d; \
+            \|<value type="int" value="20"/>|d' \
+        /etc/xdg/xfce4/panel/default.xml
 
 # Source the Chrome extension from the auto-synced runtime tree
 # (sync-hive-src.sh mirrors hive-desktop-runtime/tools/browser-extension/
@@ -101,7 +132,34 @@ RUN /opt/hive/.venv/bin/hive --help >/dev/null
 # Earlier versions pointed this at /opt/hive (source code) — not useful.
 # The API key (KIMI_API_KEY) is NOT baked here; pass via docker run -e.
 RUN mkdir -p /root/.hive /root/Desktop \
-    && ln -sfn /root/.hive /root/Desktop/Hive
+    # Old approach: ln -sfn /root/.hive /root/Desktop/Hive — that gave
+    # a generic blue Adwaita folder-link icon on the desktop. Even with
+    # Papirus-Dark as the active xsettings IconThemeName, xfdesktop's
+    # symlink rendering fell through to a stock blue tinted glyph that
+    # competed with the brand. Replacing the symlink with a proper
+    # .desktop entry lets us pin the icon to our own hex-cluster SVG
+    # (Icon=/opt/hive-branding/hive-mark.svg), so the desktop's single
+    # remaining icon IS the OpenHive brand mark — clean, on-brand,
+    # no theme-fallback risk.
+    && printf '%s\n' \
+         '[Desktop Entry]' \
+         'Version=1.0' \
+         'Type=Application' \
+         'Name=Hive' \
+         'GenericName=OpenHive workspace' \
+         'Comment=Open the OpenHive workspace folder (queens, colonies, sessions, secrets)' \
+         'Exec=xdg-open /root/.hive' \
+         # Use named icon (looked up in the icon-theme), not an absolute
+         # path. xfdesktop's pixbuf loader had trouble with the absolute
+         # path version (showed a generic document fallback). The
+         # openhive-mark.svg gets installed under
+         # /usr/share/icons/hicolor/scalable/apps/ below — hicolor is
+         # inherited by every theme so the lookup always resolves.
+         'Icon=openhive-mark' \
+         'Terminal=false' \
+         'Categories=Utility;' \
+         > /root/Desktop/Hive.desktop \
+    && chmod +x /root/Desktop/Hive.desktop
 COPY hive-configuration.json /root/.hive/configuration.json
 
 # ───────────────────────────── OpenHive branding ─────────────────────────────
@@ -130,6 +188,75 @@ COPY hive-configuration.json /root/.hive/configuration.json
 #      No extension, no Chrome-Web-Store dependency.
 COPY branding /opt/hive-branding
 RUN chmod +x /opt/hive-branding/apply-branding.sh \
+    # Install the OpenHive hex-cluster mark into hicolor as
+    # `openhive-mark` so anywhere an Icon= references it (the desktop
+    # Hive.desktop, future panel launchers, etc) can resolve via the
+    # standard icon-theme lookup chain. hicolor is the universal base
+    # theme inherited by Papirus, Adwaita, and all the others, so the
+    # icon shows up regardless of the active theme.
+    # Install our own icon theme `Hive-Overrides` that inherits
+    # Papirus-Dark. The previous approach (writing overrides into
+    # Papirus-Dark's own size dirs) failed because Papirus-Dark's
+    # 48x48/64x64/128x128 directories are SYMLINKS into Papirus, AND
+    # the leaf files (user-home.svg) within Papirus are themselves
+    # symlinks to user-blue-home.svg. Every `cp` we tried — even with
+    # `rm -f` first — was touching the wrong indirection level, so
+    # xfdesktop kept rendering Papirus's blue folder.
+    #
+    # By creating a sibling theme that inherits Papirus-Dark, we own
+    # the directory hierarchy completely (no symlinks), and GTK's
+    # icon-theme lookup chain becomes:
+    #   Hive-Overrides → Papirus-Dark → (breeze-dark missing) →
+    #   Adwaita → gnome → hicolor
+    # so anything NOT in Hive-Overrides cascades through Papirus-Dark
+    # unchanged, but the three icons we override (user-home for Home,
+    # drive-harddisk for File System, openhive-mark for the Hive
+    # desktop entry) get our brand glyphs.
+    #
+    # Sources: xfdesktop's special-file-icon.c hardcodes "drive-harddisk"
+    # for filesystem and falls through to g_file_info_get_icon for home
+    # (which returns "user-home"). GTK3 always appends Adwaita/gnome/
+    # hicolor to every Inherits chain (gtkicontheme.c:load_themes), so
+    # missing Inherits targets (breeze-dark) skip silently — confirmed
+    # via xfce4-icon-theme audit by general-purpose agent.
+    && cp -r /opt/hive-branding/hive-icons-theme /usr/share/icons/Hive-Overrides \
+    # Rasterize the SVGs to fixed-size PNGs at every directory size the
+    # index.theme declares (16/22/24/32/48/64/128/256). xfdesktop's
+    # desktop-icon lookup REJECTS Type=Scalable entries and only matches
+    # Type=Fixed PNG rasters — this was definitively proven via strace
+    # of the live xfdesktop process: the lookup walked past
+    # Hive-Overrides (despite the theme being discovered and the cache
+    # containing user-home) and fell through to Adwaita's
+    # /usr/share/icons/Adwaita/48x48/places/user-home.png as the final
+    # hit. The previous Hive-Overrides-with-scalable-only attempt
+    # failed for exactly this reason. Keeping the SVGs around in
+    # scalable/ for apps (e.g. Thunar's file list) that DO accept them.
+    && for entry in places/user-home devices/drive-harddisk apps/openhive-mark ; do \
+         ctx="${entry%/*}" ; name="${entry##*/}" ; \
+         src="/usr/share/icons/Hive-Overrides/scalable/${ctx}/${name}.svg" ; \
+         for sz in 16 22 24 32 48 64 128 256 ; do \
+           dst_dir="/usr/share/icons/Hive-Overrides/${sz}x${sz}/${ctx}" ; \
+           mkdir -p "$dst_dir" ; \
+           rsvg-convert -w "$sz" -h "$sz" -o "$dst_dir/${name}.png" "$src" ; \
+         done ; \
+       done \
+    && gtk-update-icon-cache -f /usr/share/icons/Hive-Overrides 2>/dev/null || true \
+    && gtk-update-icon-cache -f /usr/share/icons/hicolor 2>/dev/null || true \
+    # Seed system-wide xsettings xfconf channel — xfconfd reads this on
+    # first session and copies into ~/.config/xfce4/xfconf/... so even
+    # if apply-branding.sh hasn't fired yet, the icon theme is correct
+    # from xfdesktop's first paint. Belt + braces with the script-time
+    # xfconf-query in apply-branding.sh.
+    && mkdir -p /etc/xdg/xfce4/xfconf/xfce-perchannel-xml \
+    && printf '%s\n' \
+         '<?xml version="1.0" encoding="UTF-8"?>' \
+         '<channel name="xsettings" version="1.0">' \
+         '  <property name="Net" type="empty">' \
+         '    <property name="IconThemeName" type="string" value="Hive-Overrides"/>' \
+         '    <property name="ThemeName" type="string" value="Greybird-dark"/>' \
+         '  </property>' \
+         '</channel>' \
+         > /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml \
     && mkdir -p /usr/share/novnc/hive-branding \
     # Serve the noVNC overlay CSS and the hive-mark SVG over websockify
     # (port 6080) at the same origin as vnc.html. The CSS references
@@ -157,10 +284,20 @@ RUN chmod +x /opt/hive-branding/apply-branding.sh \
     # policy file above. Same http://127.0.0.1:9998/ URL for the same
     # extension-permission reason.
     && mkdir -p /etc/opt/chrome \
+    # Theme keys: use_system_theme=true makes Chrome inherit GTK
+    # Greybird-dark for the tab bar / address bar / browser frame
+    # (without this Chrome ships with its own light theme regardless of
+    # the system GTK setting). browser.theme.system_theme=1 is the
+    # equivalent profile-level setting Chrome stores once a user picks
+    # "Use System Theme" in chrome://settings/appearance — pre-seeding
+    # it via master_preferences saves the user from having to set it
+    # manually on every fresh profile.
     && printf '%s\n' \
          '{"homepage": "http://127.0.0.1:9998/newtab.html",' \
          ' "homepage_is_newtabpage": false,' \
-         ' "browser": {"show_home_button": true, "check_default_browser": false},' \
+         ' "browser": {"show_home_button": true, "check_default_browser": false,' \
+         '             "theme": {"system_theme": 1}},' \
+         ' "extensions": {"theme": {"use_system_theme": true}},' \
          ' "session": {"restore_on_startup": 4,' \
          '             "startup_urls": ["http://127.0.0.1:9998/newtab.html"]}}' \
          > /etc/opt/chrome/master_preferences \
@@ -181,12 +318,37 @@ RUN chmod +x /opt/hive-branding/apply-branding.sh \
          /usr/bin/google-chrome-stable 200 \
     && update-alternatives --install /usr/bin/gnome-www-browser gnome-www-browser \
          /usr/bin/google-chrome-stable 200 \
+    # Custom WebBrowser helper. We can't use the stock google-chrome
+    # helper because xfce4-mime-helper runs the binary without
+    # --no-sandbox, which makes Chrome refuse to start under root and
+    # exit 1. The "Failed to execute default Web Browser. Input/output
+    # error." dialog the user kept seeing is glib's g_strerror(EIO)
+    # for that non-zero child exit — NOT a missing helper. Wrap chrome
+    # with the flag baked into X-XFCE-Commands so every consumer of
+    # exo-open --launch WebBrowser hits the working path.
+    && mkdir -p /usr/share/xfce4/helpers \
+    && printf '%s\n' \
+         '[Desktop Entry]' \
+         'Version=1.0' \
+         'Encoding=UTF-8' \
+         'Type=X-XFCE-Helper' \
+         'NoDisplay=true' \
+         'Name=Hive Chrome' \
+         'Icon=google-chrome' \
+         'X-XFCE-Category=WebBrowser' \
+         'X-XFCE-Binaries=google-chrome-stable;google-chrome;' \
+         'X-XFCE-Commands=%B --no-sandbox --test-type --user-data-dir=/data/chrome;' \
+         'X-XFCE-CommandsWithParameter=%B --no-sandbox --test-type --user-data-dir=/data/chrome "%s";' \
+         'StartupNotify=true' \
+         > /usr/share/xfce4/helpers/hive-chrome.desktop \
     && mkdir -p /root/.config/xfce4 \
     && printf '%s\n' \
-         'WebBrowser=google-chrome' \
+         'WebBrowser=hive-chrome' \
          'TerminalEmulator=xfce4-terminal' \
          'FileManager=Thunar' \
          > /root/.config/xfce4/helpers.rc \
+    && mkdir -p /etc/xdg/xfce4 \
+    && cp /root/.config/xfce4/helpers.rc /etc/xdg/xfce4/helpers.rc \
     && mkdir -p /root/.config \
     && printf '%s\n' \
          '[Default Applications]' \
@@ -204,9 +366,9 @@ RUN chmod +x /opt/hive-branding/apply-branding.sh \
     # the source of the bright-blue "Home" / "Hive" folder icons the
     # user flagged as off-brand).
     && mkdir -p /root/.config/gtk-3.0 /root/.config/xfce4/xfconf/xfce-perchannel-xml \
-    && printf '[Settings]\ngtk-theme-name=Greybird-dark\ngtk-icon-theme-name=Papirus-Dark\ngtk-font-name=Inter 10\ngtk-application-prefer-dark-theme=1\n' \
+    && printf '[Settings]\ngtk-theme-name=Greybird-dark\ngtk-icon-theme-name=Hive-Overrides\ngtk-font-name=Inter 10\ngtk-application-prefer-dark-theme=1\n' \
          > /root/.config/gtk-3.0/settings.ini \
-    && printf '[Net]\nThemeName=Greybird-dark\nIconThemeName=Papirus-Dark\n' \
+    && printf '[Net]\nThemeName=Greybird-dark\nIconThemeName=Hive-Overrides\n' \
          > /root/.gtkrc-2.0
 
 EXPOSE 4001 6080 8787 9229 9230

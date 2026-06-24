@@ -60,27 +60,8 @@
      * already compete for visual attention), the soft honey glow sits
      * lower-left so the eye lands on the centered hero first.
      */
-    .bg-watermark {
-      position: fixed;
-      bottom: -120px;
-      left: -180px;
-      width: 720px;
-      height: 720px;
-      opacity: 0.35;
-      pointer-events: none;
-      filter: blur(0.5px);
-    }
-    .bg-glow {
-      position: fixed;
-      bottom: -200px;
-      left: -200px;
-      width: 700px;
-      height: 700px;
-      background: radial-gradient(ellipse at center, var(--honey) 0%, transparent 65%);
-      opacity: 0.10;
-      pointer-events: none;
-      border-radius: 50%;
-    }
+    /* v3 polish: removed bg-watermark + bg-glow — user explicitly
+     * disliked gradient backgrounds. Flat surface only. */
 
     /* ─── Nav (echoes .hive-nav from theme.scss) ─── */
     nav.hive-nav {
@@ -286,8 +267,6 @@
   </style>
 </head>
 <body>
-  <div class="bg-glow"></div>
-  <img class="bg-watermark" src="hex-watermark.svg" alt="" aria-hidden="true" />
 
   <nav class="hive-nav">
     <a href="https://www.open-hive.com/dashboard/overview" class="brand">

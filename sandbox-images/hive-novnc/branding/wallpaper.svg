@@ -6,9 +6,9 @@
 
   <rect width="1280" height="800" fill="#0B0B0B" />
 
-  <g transform="translate(72 96)">
-    <g transform="translate(0 -4) scale(0.52) translate(-32 -32) scale(1.15) translate(-32 -27)"
-       fill="none" stroke="#C8943E" stroke-width="2" stroke-linejoin="round">
+  <g transform="translate(1208 96)">
+    <g transform="translate(-188 -10) scale(0.5) translate(-32 -32) scale(1.15) translate(-32 -27)"
+       fill="none" stroke="#C8943E" stroke-width="2.2" stroke-linejoin="round">
       <polygon points="20,14 25.2,17 25.2,23 20,26 14.8,23 14.8,17"/>
       <polygon points="32,7 37.2,10 37.2,16 32,19 26.8,16 26.8,10"/>
       <polygon points="44,14 49.2,17 49.2,23 44,26 38.8,23 38.8,17"/>
@@ -17,19 +17,20 @@
       <polygon points="20,28 25.2,31 25.2,37 20,40 14.8,37 14.8,31"/>
       <polygon points="32,21 37.2,24 37.2,30 32,33 26.8,30 26.8,24"/>
     </g>
-    <text x="44" y="6"
+    <text x="0" y="0"
           font-family="Inter Tight, Inter, DejaVu Sans, sans-serif"
-          font-size="28" font-weight="600" letter-spacing="-0.6">
+          font-size="28" font-weight="600" letter-spacing="-0.6"
+          text-anchor="end">
       <tspan fill="#EDEDED">Open</tspan><tspan fill="#C8943E">Hive</tspan>
     </text>
-    <text x="44" y="28"
+    <text x="0" y="22"
           font-family="JetBrains Mono, DejaVu Sans Mono, monospace"
           font-size="10" letter-spacing="2.4"
-          fill="#5A5A5A">CLOUD&#160;WORKSTATION</text>
+          fill="#5A5A5A"
+          text-anchor="end">CLOUD&#160;WORKSTATION</text>
   </g>
 
-  <line x1="72" y1="704" x2="1208" y2="704"
-        stroke="#1E1E1E" stroke-width="1" />
+  <line x1="72" y1="704" x2="1208" y2="704" stroke="#1E1E1E" stroke-width="1" />
 
   <g transform="translate(72 744)">
     <text x="0" y="0"
@@ -38,13 +39,12 @@
       <tspan fill="#C8943E">§ 01</tspan><tspan fill="#3A3A3A">&#160;&#160;//&#160;&#160;</tspan><tspan fill="#8A8A8A">SURFACE</tspan>
     </text>
   </g>
-
   <g transform="translate(1208 744)">
     <text x="0" y="0"
           font-family="JetBrains Mono, DejaVu Sans Mono, monospace"
           font-size="10" letter-spacing="2.4"
           text-anchor="end">
-      <tspan fill="#8A8A8A">v4-rc</tspan><tspan fill="#3A3A3A">&#160;&#160;//&#160;&#160;</tspan><tspan fill="#5A5A5A">81e8083c</tspan>
+      <tspan fill="#8A8A8A">v4-rc</tspan>
     </text>
   </g>
 </svg>

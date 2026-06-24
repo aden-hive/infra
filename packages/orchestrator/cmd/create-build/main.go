@@ -48,7 +48,14 @@ import (
 
 const (
 	baseImage = "e2bdev/base:latest"
-	proxyPort = 5007
+	// defaultProxyPort matches the live orchestrator's PROXY_PORT default
+	// (pkg/cfg/model.go). When create-build runs INSTEAD of the live orch
+	// (e.g. local dev, the prior roll-template.sh workflow that stopped
+	// nomad), 5007 is correct. When create-build runs ALONGSIDE the live
+	// orch (the seamless-template-roll flow), pass a `-proxy-port` outside
+	// the live orch's port range — the script ships with +100 shifts so
+	// every network listener create-build needs has a non-colliding twin.
+	defaultProxyPort = 5007
 )
 
 func main() {
@@ -69,6 +76,7 @@ func main() {
 	timeout := flag.Int("timeout", 5, "build timeout in minutes")
 	verbose := flag.Bool("v", false, "verbose output")
 	fromImage := flag.String("fromImage", baseImage, "base OCI image to build from (default: e2bdev/base:latest)")
+	proxyPort := flag.Int("proxy-port", defaultProxyPort, "sandbox proxy port (must NOT collide with PROXY_PORT of any live orchestrator on this host)")
 	flag.Parse()
 
 	if *toBuild == "" {
@@ -101,7 +109,7 @@ func main() {
 		log.Fatalf("network config: %v", err)
 	}
 
-	err = doBuild(ctx, *templateID, *toBuild, *fromBuild, *fromImage, *kernel, *fc, *vcpu, *memory, *disk, *hugePages, *startCmd, *setupCmd, *readyCmd, localMode, *verbose, *timeout, builderConfig, networkConfig)
+	err = doBuild(ctx, *templateID, *toBuild, *fromBuild, *fromImage, *kernel, *fc, *vcpu, *memory, *disk, *hugePages, *startCmd, *setupCmd, *readyCmd, localMode, *verbose, *timeout, *proxyPort, builderConfig, networkConfig)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -206,6 +214,7 @@ func doBuild(
 	startCmd, setupCmd, readyCmd string,
 	localMode, verbose bool,
 	timeout int,
+	proxyPort int,
 	builderConfig cfg.BuilderConfig,
 	networkConfig network.Config,
 ) error {
@@ -250,7 +259,7 @@ func doBuild(
 
 	sandboxes := sandbox.NewSandboxesMap()
 
-	sandboxProxy, err := proxy.NewSandboxProxy(noop.MeterProvider{}, proxyPort, sandboxes, featureFlags)
+	sandboxProxy, err := proxy.NewSandboxProxy(noop.MeterProvider{}, uint16(proxyPort), sandboxes, featureFlags)
 	if err != nil {
 		return fmt.Errorf("proxy: %w", err)
 	}
