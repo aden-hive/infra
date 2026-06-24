@@ -14,6 +14,7 @@ exec google-chrome-stable \
   --no-first-run \
   --no-default-browser-check \
   --disable-features=TranslateUI,AutomationControlled \
+  --enable-features=WebUIDarkMode \
   --disable-popup-blocking \
   --disable-dev-shm-usage \
   --password-store=basic \
@@ -22,4 +23,5 @@ exec google-chrome-stable \
   --remote-debugging-address=127.0.0.1 \
   --window-size=1100,720 \
   --window-position=80,40 \
-  https://www.google.com
+  --homepage=http://127.0.0.1:9998/newtab.html \
+  http://127.0.0.1:9998/newtab.html

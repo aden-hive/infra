@@ -1,0 +1,345 @@
+<!doctype html>
+<!--
+  OpenHive cloud-workstation new-tab page.
+
+  Visually matches the open-hive.com brand site's dark-theme tokens
+  (style/theme.scss). Renders entirely from local assets so it loads
+  instantly even if the VM has no egress to fonts.googleapis.com:
+
+    - hive-mark.svg          7-hex cluster (favicon.svg, brand mark)
+    - hex-watermark.svg      large glowing watermark (figma asset)
+    - fonts-inter (apt)      Inter / Inter Tight
+    - fonts-jetbrains-mono   JetBrains Mono
+
+  Wired via Chrome managed-policy: /etc/opt/chrome/policies/managed/
+  hive-newtab.json sets NewTabPageLocation to this file's file:// URL,
+  and start-chrome.sh launches Chrome with this URL as the start page
+  (Chrome's command-line start URL beats NTP otherwise).
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>OpenHive · Cloud workstation</title>
+  <link rel="icon" type="image/svg+xml" href="hive-mark.svg" />
+  <style>
+    :root {
+      --bg:           #0B0B0B;
+      --surface:      #111111;
+      --surface-2:    #161616;
+      --surface-3:    #1C1C1C;
+      --border:       #1E1E1E;
+      --border-2:     #2A2A2A;
+      --border-3:     #3A3A3A;
+      --text:         #EDEDED;
+      --text-2:       #CCCCCC;
+      --muted:        #8A8A8A;
+      --dim:          #5A5A5A;
+      --accent:       #E0B452;
+      --accent-deep:  #C8943E;
+      --accent-soft:  rgba(224, 180, 82, 0.10);
+      --accent-line:  rgba(224, 180, 82, 0.30);
+      --honey:        #ECBD13;
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Inter Tight", "Inter", "DejaVu Sans", system-ui, sans-serif;
+      font-feature-settings: "ss01", "cv11";
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+    .mono { font-family: "JetBrains Mono", "DejaVu Sans Mono", ui-monospace, monospace; }
+    ::selection { background: var(--accent); color: #0B0B0B; }
+
+    /*
+     * Background composition mirrors the wallpaper but tuned for in-tab
+     * viewing: the hex watermark is muted (the dock + tabs overlay
+     * already compete for visual attention), the soft honey glow sits
+     * lower-left so the eye lands on the centered hero first.
+     */
+    .bg-watermark {
+      position: fixed;
+      bottom: -120px;
+      left: -180px;
+      width: 720px;
+      height: 720px;
+      opacity: 0.35;
+      pointer-events: none;
+      filter: blur(0.5px);
+    }
+    .bg-glow {
+      position: fixed;
+      bottom: -200px;
+      left: -200px;
+      width: 700px;
+      height: 700px;
+      background: radial-gradient(ellipse at center, var(--honey) 0%, transparent 65%);
+      opacity: 0.10;
+      pointer-events: none;
+      border-radius: 50%;
+    }
+
+    /* ─── Nav (echoes .hive-nav from theme.scss) ─── */
+    nav.hive-nav {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      padding: 14px 32px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: color-mix(in oklab, var(--bg) 86%, transparent);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      z-index: 5;
+    }
+    nav.hive-nav .brand {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      text-decoration: none;
+    }
+    nav.hive-nav .brand .mark {
+      width: 22px; height: 22px;
+      align-self: center;
+      background: url("hive-mark.svg") center/contain no-repeat;
+    }
+    nav.hive-nav .brand .wordmark {
+      font-size: 16px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      color: var(--text);
+    }
+    nav.hive-nav .brand .wordmark .hv {
+      color: var(--accent-deep);
+    }
+    nav.hive-nav .brand .parent {
+      color: var(--muted);
+      font-size: 9px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      white-space: nowrap;
+      margin-left: 4px;
+    }
+    nav.hive-nav .right {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
+    nav.hive-nav .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 10px;
+      border: 1px solid var(--border-2);
+      border-radius: 999px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+    nav.hive-nav .badge .dot {
+      width: 5px; height: 5px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 6px var(--accent);
+    }
+
+    /* ─── Hero ─── */
+    main {
+      position: relative;
+      z-index: 2;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 28px;
+      padding: 60px 32px;
+    }
+    .eyebrow {
+      font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace;
+      font-size: 11px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--muted);
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .eyebrow .bar { width: 14px; height: 1px; background: var(--accent); }
+    .eyebrow .num { color: var(--accent); }
+
+    .hero-mark {
+      width: 88px; height: 88px;
+      background: url("hive-mark.svg") center/contain no-repeat;
+      filter: drop-shadow(0 8px 32px rgba(224, 180, 82, 0.18));
+      margin-bottom: 4px;
+    }
+    .hero-wordmark {
+      font-size: 56px;
+      font-weight: 600;
+      letter-spacing: -0.028em;
+      line-height: 1;
+      color: var(--text);
+      font-family: "Inter Tight", "Inter", sans-serif;
+    }
+    .hero-wordmark .hv { color: var(--accent-deep); }
+    .hero-tagline {
+      font-size: 15px;
+      color: var(--muted);
+      max-width: 480px;
+      text-align: center;
+      line-height: 1.55;
+      margin-top: -8px;
+    }
+
+    /* ─── Search pill ─── */
+    form.search {
+      width: min(600px, 100%);
+      display: flex;
+      align-items: center;
+      gap: 0;
+      background: var(--surface);
+      border: 1px solid var(--border-2);
+      border-radius: 999px;
+      padding: 4px 4px 4px 22px;
+      transition: border-color 120ms ease, box-shadow 120ms ease;
+      margin-top: 8px;
+    }
+    form.search:focus-within {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-soft);
+    }
+    form.search input {
+      flex: 1;
+      border: 0;
+      outline: 0;
+      background: transparent;
+      font: inherit;
+      font-size: 15px;
+      color: var(--text);
+      padding: 12px 14px 12px 0;
+    }
+    form.search input::placeholder { color: var(--muted); }
+    form.search button {
+      border: 0;
+      background: var(--accent);
+      color: #0B0B0B;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      padding: 11px 22px;
+      border-radius: 999px;
+      cursor: pointer;
+      transition: filter 120ms ease;
+    }
+    form.search button:hover { filter: brightness(1.08); }
+
+    /* ─── Quick links ─── */
+    .quicklinks {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: center;
+      max-width: 600px;
+      margin-top: 4px;
+    }
+    .quicklinks a {
+      font-size: 12px;
+      color: var(--text-2);
+      text-decoration: none;
+      padding: 8px 14px;
+      border: 1px solid var(--border-2);
+      border-radius: 999px;
+      background: var(--surface);
+      transition: all 120ms ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .quicklinks a:hover {
+      border-color: var(--accent-line);
+      background: var(--surface-2);
+      color: var(--text);
+    }
+    .quicklinks a .dot {
+      width: 4px; height: 4px;
+      border-radius: 50%;
+      background: var(--accent-deep);
+      opacity: 0.7;
+    }
+
+    /* ─── Footer ─── */
+    footer {
+      position: fixed;
+      bottom: 16px;
+      left: 0; right: 0;
+      text-align: center;
+      font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace;
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      color: var(--dim);
+    }
+    footer .sep { color: var(--border-3); margin: 0 8px; }
+  </style>
+</head>
+<body>
+  <div class="bg-glow"></div>
+  <img class="bg-watermark" src="hex-watermark.svg" alt="" aria-hidden="true" />
+
+  <nav class="hive-nav">
+    <a href="https://www.open-hive.com/dashboard/overview" class="brand">
+      <span class="mark" aria-hidden="true"></span>
+      <span class="wordmark">Open<span class="hv">Hive</span></span>
+      <span class="parent mono">CLOUD WORKSTATION</span>
+    </a>
+    <div class="right">
+      <span class="badge"><span class="dot"></span><span class="mono">v4-rc · online</span></span>
+    </div>
+  </nav>
+
+  <main>
+    <div class="eyebrow">
+      <span class="bar"></span>
+      <span class="num mono">§ 01</span>
+      <span>new tab</span>
+    </div>
+    <div class="hero-mark" aria-hidden="true"></div>
+    <h1 class="hero-wordmark">Open<span class="hv">Hive</span></h1>
+    <p class="hero-tagline">
+      A focused workspace for the cloud queens.
+      Search or paste any URL — the rest of the desktop is yours.
+    </p>
+    <!--
+      Address-bar form. Action= sends to Google by default so a typed
+      query still works, but a typed URL with scheme bypasses this form
+      via the browser's omnibox URL handler.
+    -->
+    <form class="search" action="https://www.google.com/search" method="GET" autocomplete="off">
+      <input
+        name="q"
+        autofocus
+        placeholder="Search or paste a URL…"
+        spellcheck="false"
+        autocapitalize="off"
+        autocorrect="off"
+      />
+      <button type="submit">Go</button>
+    </form>
+    <div class="quicklinks">
+      <a href="https://www.open-hive.com/dashboard/overview"><span class="dot"></span>Dashboard</a>
+      <a href="https://www.linkedin.com"><span class="dot"></span>LinkedIn</a>
+      <a href="https://mail.google.com"><span class="dot"></span>Gmail</a>
+      <a href="https://app.hubspot.com"><span class="dot"></span>HubSpot</a>
+      <a href="https://www.notion.so"><span class="dot"></span>Notion</a>
+      <a href="https://calendar.google.com"><span class="dot"></span>Calendar</a>
+    </div>
+  </main>
+
+  <footer class="mono">
+    OPENHIVE <span class="sep">·</span> CLOUD WORKSTATION <span class="sep">·</span> v4-rc
+  </footer>
+</body>
+</html>

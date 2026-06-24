@@ -1,0 +1,13 @@
+{
+  "_comment_purpose": "Chrome managed-policy that pins the new-tab / startup / homepage to the local Hive landing page. Without this, Chrome's default new-tab shows Google's promotional carousel, which looks nothing like the OpenHive cloud workstation. Dropped into /etc/opt/chrome/policies/managed/ by the Dockerfile; Chrome reads this directory at startup (no extension needed).",
+  "_comment_http_not_file": "URLs are http://127.0.0.1:9998/ not file:///. file:// would force Chrome to prompt for 'Allow access to file URLs' on every extension install, which the hive-browser-bridge extension can't request itself — that broke the bridge with a 'file permission required' notice. Serving over HTTP from the localhost branding server (see supervisord [program:branding-http]) keeps the bridge's <all_urls> permission valid without user interaction.",
+  "_comment_homepage": "HomepageLocation + HomepageIsNewTabPage forces the home button to open our page. NewTabPageLocation overrides what Ctrl+T / cmd+T opens. RestoreOnStartup=4 + RestoreOnStartupURLs makes the very first window of a session land on our page too — important because the cloud workstation often starts with a single fresh tab.",
+  "_comment_search": "DefaultSearchProviderEnabled stays true so the form's GET /search action keeps working as expected when the user types into the address bar. We only override the new-tab surface, not the search engine itself — the queens occasionally rely on Google for ad-hoc lookups.",
+
+  "HomepageLocation": "http://127.0.0.1:9998/newtab.html",
+  "HomepageIsNewTabPage": false,
+  "NewTabPageLocation": "http://127.0.0.1:9998/newtab.html",
+  "RestoreOnStartup": 4,
+  "RestoreOnStartupURLs": ["http://127.0.0.1:9998/newtab.html"],
+  "ShowHomeButton": true
+}
