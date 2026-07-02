@@ -20,7 +20,9 @@ import (
 //
 // Per-tag delete is a TWO-step dance against the registry HTTP API
 // (RFC: docker distribution v2):
-//   1. HEAD /v2/<name>/manifests/<tag>  with Accept: application/vnd.docker.distribution.manifest.v2+json
+//   1. HEAD /v2/<name>/manifests/<tag>  with Accept covering both docker-v2
+//      and OCI media types (buildkit pushes OCI image indexes; the registry
+//      404s if the Accept list doesn't include the stored type)
 //      → returns `Docker-Content-Digest` header
 //   2. DELETE /v2/<name>/manifests/<digest>
 //
@@ -179,10 +181,15 @@ func (d *DockerRegistryTags) collect(ctx context.Context) ([]tagCandidate, []str
 func (d *DockerRegistryTags) headManifest(ctx context.Context, tag string) (string, uint64, error) {
 	url := fmt.Sprintf("%s/v2/%s/manifests/%s", d.RegistryURL, d.Repo, tag)
 	out, err := runOK(ctx, "curl", "-sSI", "-m", "5",
-		"-H", "Accept: application/vnd.docker.distribution.manifest.v2+json",
+		"-H", "Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json",
 		url)
 	if err != nil {
 		return "", 0, err
+	}
+	// curl exits 0 on HTTP errors; surface the status instead of the
+	// misleading "no digest in response".
+	if first := strings.SplitN(out, "\n", 2)[0]; !strings.Contains(first, " 200") {
+		return "", 0, fmt.Errorf("HEAD returned %s", strings.TrimSpace(first))
 	}
 	// Parse the response headers naively.
 	var digest string
