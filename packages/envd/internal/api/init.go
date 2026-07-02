@@ -326,50 +326,44 @@ func (a *API) setupNFS(ctx context.Context, logger zerolog.Logger, lifecycleID *
 }
 
 func (a *API) unmountNFS(ctx context.Context, logger zerolog.Logger, path string) error {
-	// Check if actually mounted before trying to unmount.
-	// findmnt returns exit code 1 when path is not a mount point - that's not an error.
-	data, err := exec.CommandContext(ctx, "findmnt", "--noheadings", "--output", "SOURCE", path).CombinedOutput()
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-			// Not mounted - nothing to unmount
-			return nil
-		}
-
-		return fmt.Errorf("failed to check if %q is mounted: %w", path, err)
-	}
-
-	source := strings.TrimSpace(string(data))
-	if source == "" {
-		return nil // already unmounted
-	}
-
-	logger.Debug().Msgf("Unmounting stale NFS mount at %q (was: %s)", path, source)
-
-	// Force + lazy unmount. `--force` alone is documented for NFS where
-	// the server is unreachable, but it still fails synchronously when
-	// the kernel has a frozen mount entry whose handle was captured in
-	// a paused-VM memory snapshot — the typical state on resume. The
-	// mount's TCP socket is dead from the orchestrator's NFS proxy
-	// perspective, but the in-kernel mount table still holds a
-	// reference, and `umount --force` returns EBUSY/EAGAIN. Adding
-	// `--lazy` detaches the filesystem from the namespace immediately
-	// and lets the kernel reclaim the stale references in the
-	// background, which is exactly what we want before mountNFS
-	// re-attaches a fresh handle on the same path.
+	// Skip the findmnt pre-check. The prior implementation called
+	//   findmnt --noheadings --output SOURCE <path>
+	// and only tolerated exit code 1 ("not mounted"). That fails on a
+	// fresh-boot sandbox where /root/.hive doesn't exist yet as a
+	// directory: findmnt exits with a code that's neither 0 nor 1
+	// (different util-linux versions disagree — some return 32
+	// "invalid argument", some return 2). envd then returns 400 and the
+	// e2b api surfaces it as 500 to hive-backend, breaking every
+	// volume-backed sandbox spawn.
 	//
-	// Without -fl, every pause/resume cycle for a volume-mounted sandbox
-	// returns HTTP 400 from PostInit and the e2b orchestrator surfaces
-	// it as 500 to api callers — see infra/packages/api/internal/
-	// orchestrator/keep_alive.go path. The end-user symptom is
-	// "Resume" → spinner → "internal_error" forever, with no recovery
-	// short of a fresh spawn.
-	data, err = exec.CommandContext(ctx, "umount", "-fl", path).CombinedOutput()
+	// `umount -fl <path>` is idempotent in practice: if the path isn't
+	// mounted (or doesn't exist), umount returns non-zero and we treat
+	// it as benign. The only failure modes we still want to surface are
+	// catastrophic — and those would block the subsequent mountNFS
+	// anyway, where the error will be far more diagnostic. So drop the
+	// findmnt round-trip entirely.
+	//
+	// Background on why we need `umount --force --lazy` rather than a
+	// plain `umount`: when a paused-VM memory snapshot captured a live
+	// NFS mount, the in-kernel mount entry survives resume even though
+	// the NFS proxy's TCP socket is dead. `--force` alone is documented
+	// for unreachable-server NFS but still returns EBUSY/EAGAIN in this
+	// frozen-handle case; `--lazy` detaches the filesystem from the
+	// namespace immediately and lets the kernel reclaim references in
+	// the background, which is exactly what mountNFS needs before
+	// re-attaching a fresh handle on the same path.
+	data, err := exec.CommandContext(ctx, "umount", "-fl", path).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("failed to unmount stale NFS mount at %q: %w\n%s", path, err, string(data))
+		// Best-effort: log and continue. If the path wasn't mounted,
+		// this is "umount: <path>: not mounted." which is what we want
+		// anyway. If the path is genuinely broken, mountNFS will fail
+		// next with a clearer error.
+		logger.Debug().Msgf("umount -fl %q non-fatal: %v - %s",
+			path, err, strings.TrimSpace(string(data)))
 	}
 
-	// Clear our tracking state for this path
+	// Clear our tracking state for this path so the next mountNFS
+	// triggers a fresh mount rather than a "skipped, already mounted".
 	a.mountedPaths.Delete(path)
 
 	return nil
