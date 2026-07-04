@@ -94,6 +94,19 @@ func main() {
 		),
 	}
 
+	// Fold the firecracker fleet totals into every system sample so the
+	// portal's fleet stat card + sparkline track /firecracker's view.
+	s.sysHistory.SetFCTotals(func() (int, float64, uint64) {
+		procs := s.procSampler.Snapshot()
+		var cpu float64
+		var rss uint64
+		for _, p := range procs {
+			cpu += p.CPUPct
+			rss += p.RSSMiB
+		}
+		return len(procs), cpu, rss
+	})
+
 	// Two long-lived samplers. Each writes into its own ring buffer so
 	// every /endpoint can return instantly without doing any /proc work
 	// on the request path (kept under 5ms when the buffers are warm).

@@ -80,9 +80,19 @@ type History struct {
 	interval time.Duration
 	size     int
 
+	// Optional fleet roll-up folded into every sample (fc_total_*).
+	// Nil leaves those fields zero. Set before Run — not synchronized.
+	fcTotals func() (count int, cpuPct float64, rssMiB uint64)
+
 	mu      sync.RWMutex
 	current Snapshot
 	ring    []Snapshot // newest at the tail; len ≤ size
+}
+
+// SetFCTotals wires the firecracker sampler's totals into each sample.
+// Must be called before Run.
+func (h *History) SetFCTotals(fn func() (count int, cpuPct float64, rssMiB uint64)) {
+	h.fcTotals = fn
 }
 
 func NewHistory(procRoot string, interval time.Duration, size int) *History {
@@ -123,6 +133,9 @@ func (h *History) Snapshot() (Snapshot, []Snapshot) {
 
 func (h *History) tick() {
 	snap := Collect(h.procRoot)
+	if h.fcTotals != nil {
+		snap.FCTotalCount, snap.FCTotalCPUPct, snap.FCTotalRSSMiB = h.fcTotals()
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.current = snap
