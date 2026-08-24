@@ -1,0 +1,28 @@
+[Unit]
+Description=E2B Orchestrator (single-node PoC)
+After=network-online.target redis-server.service
+Wants=network-online.target redis-server.service
+
+[Service]
+Type=simple
+Environment=STORAGE_PROVIDER=Local
+Environment=LOCAL_TEMPLATE_STORAGE_BASE_PATH=/orchestrator/build-cache/templates
+Environment=LOCAL_BUILD_CACHE_STORAGE_BASE_PATH=/orchestrator/build-cache
+Environment=REDIS_URL=127.0.0.1:6379
+Environment=NODE_ID=ovh-vinthill-1
+Environment=NODE_IP=127.0.0.1
+Environment=ORCHESTRATOR_SERVICES=orchestrator
+Environment=GRPC_PORT=5008
+Environment=PROXY_PORT=5007
+Environment=USE_LOCAL_NAMESPACE_STORAGE=true
+Environment=ENVIRONMENT=local
+Environment=OTEL_SDK_DISABLED=true
+ExecStartPre=/bin/rm -f /orchestrator.lock
+ExecStart=/home/ubuntu/infra/packages/orchestrator/bin/orchestrator
+Restart=on-failure
+RestartSec=5s
+StandardOutput=append:/var/log/orchestrator.log
+StandardError=append:/var/log/orchestrator.log
+
+[Install]
+WantedBy=multi-user.target

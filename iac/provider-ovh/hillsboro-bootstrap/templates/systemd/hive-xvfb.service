@@ -1,0 +1,12 @@
+[Unit]
+Description=Hive browser farm - virtual display for Chrome
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/Xvfb :99 -screen 0 1280x800x24 -nolisten tcp
+Restart=always
+RestartSec=3s
+
+[Install]
+WantedBy=multi-user.target

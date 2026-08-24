@@ -1,0 +1,16 @@
+[Unit]
+Description=Hive egress proxy — source 135.148.52.236
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/tinyproxy -d -c /etc/hive/egress/hive-egress-135-148-52-236.conf
+Restart=always
+RestartSec=3s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

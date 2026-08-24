@@ -1,0 +1,27 @@
+[Unit]
+Description=Hive browser farm - Chrome, the CDP host every slot runs in
+After=network-online.target hive-xvfb.service
+Requires=hive-xvfb.service
+
+[Service]
+Type=simple
+User=ubuntu
+Environment=DISPLAY=:99
+# --password-store=basic is LOAD-BEARING, not an incidental flag. It makes
+# Chrome encrypt the cookie jar with its built-in fallback key rather than one
+# bound to a machine keyring, which is the only reason a profile can move
+# between hosts, or be restored from GCS, without invalidating every login.
+# --headless=new, not headful. Chrome 151 silently ignores
+# --remote-debugging-port in headful mode: the browser starts, the profile
+# initialises, and no port is ever bound (verified on this host — headful wrote
+# no DevToolsActivePort, headless bound immediately). The onboarding console
+# runs its own headful instance under noVNC; this one exists to serve CDP.
+ExecStart=/usr/bin/google-chrome --headless=new --no-sandbox --disable-gpu --disable-features=TranslateUI,AutomationControlled --disable-popup-blocking --disable-dev-shm-usage --password-store=basic --user-data-dir=/var/lib/hive-chrome --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 --window-size=1280,800 about:blank
+Restart=always
+RestartSec=5s
+# A renderer OOM must kill a tab, never take the host down with it.
+MemoryMax=8G
+MemoryHigh=6G
+
+[Install]
+WantedBy=multi-user.target

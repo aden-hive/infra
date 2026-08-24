@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+*.log
+spike-out/
+# Never commit credentials or captured account state.
+*-key.json
+profile.json
+hive-profiles/

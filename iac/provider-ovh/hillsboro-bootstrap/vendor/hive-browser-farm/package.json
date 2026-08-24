@@ -1,0 +1,31 @@
+{
+  "name": "hive-browser-farm",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Hosted LinkedIn profile/browser fleet \u2014 scheduler, worker, and profile store.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test 'src/**/*.test.ts'",
+    "typecheck": "tsc --noEmit",
+    "spike:migrate": "node spike/migrate.ts",
+    "spike:smoke": "node spike/smoke.ts",
+    "replicator": "node src/bin/replicator.ts",
+    "sweeper": "node src/bin/sweeper.ts",
+    "onboard": "node src/bin/onboard.ts",
+    "action": "node spike/run-action.ts",
+    "fanout": "node spike/fanout.ts",
+    "apid": "node src/bin/apid.ts"
+  },
+  "dependencies": {
+    "@google-cloud/storage": "^8.0.1",
+    "puppeteer-core": "^24.9.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}

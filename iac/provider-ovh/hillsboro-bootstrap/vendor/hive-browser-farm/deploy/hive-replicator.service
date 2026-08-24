@@ -1,0 +1,39 @@
+# Profile replication daemon.
+#
+# Deliberately a systemd unit rather than a Nomad job: §13 removes Nomad and
+# Consul because on a single box they add a failure mode (a wedged scheduler)
+# without buying the failover they exist for.
+[Unit]
+Description=Hive browser farm — profile replication to object storage
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node /opt/hive-browser-farm/src/bin/replicator.ts
+WorkingDirectory=/opt/hive-browser-farm
+Restart=always
+RestartSec=5s
+
+Environment=PROFILE_ROOT=/var/lib/hive-profiles
+Environment=PROFILE_BUCKET=aden-hive-browser-profiles
+Environment=GCP_PROJECT=aden-487803
+Environment=GOOGLE_KEY_FILE=/etc/hive/replicator-key.json
+Environment=REPLICATE_MS=10000
+Environment=LAG_ALERT_MS=60000
+
+# Durability outranks browser throughput: if the box is under memory pressure,
+# the process that gets profiles off this machine must be the last to die.
+OOMScoreAdjust=-800
+MemoryMax=512M
+
+# The key is the only credential on the box and it can write but not delete.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/hive-profiles
+ReadOnlyPaths=/etc/hive
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,78 @@
+# OVH single-node Nomad — server+client on same box, ACLs enabled.
+# When host-2 joins: deploy nomad as client-only, server_join retry_join = ["135.148.52.236"].
+# No change to this file.
+
+datacenter = "ovh-sbg"
+region     = "ovh"
+name       = "ovh-vinthill-1"
+
+bind_addr = "0.0.0.0"
+
+advertise {
+  http = "135.148.52.236"
+  rpc  = "135.148.52.236"
+  serf = "135.148.52.236"
+}
+
+data_dir = "/opt/nomad/data"
+
+addresses {
+  http = "127.0.0.1"
+}
+
+leave_on_interrupt = true
+leave_on_terminate = true
+
+server {
+  enabled          = true
+  bootstrap_expect = 1
+  heartbeat_grace  = "1m"
+}
+
+client {
+  enabled         = true
+  node_pool       = "default"
+  max_kill_timeout = "24h"
+  meta {
+    node_pool   = "default"
+    node_labels = "orchestrator,api,build"
+  }
+}
+
+plugin "raw_exec" {
+  config {
+    enabled    = true
+  }
+}
+
+plugin "docker" {
+  config {
+    volumes { enabled = true }
+  }
+}
+
+acl {
+  enabled = true
+}
+
+consul {
+  address                = "127.0.0.1:8500"
+  allow_unauthenticated  = false
+  token                  = "ab771e08-135e-3757-91af-2c76de497d2c"
+}
+
+limits {
+  http_max_conns_per_client = 200
+  rpc_max_conns_per_client  = 200
+}
+
+log_level = "INFO"
+log_json  = true
+
+telemetry {
+  collection_interval        = "5s"
+  disable_hostname           = true
+  prometheus_metrics         = true
+  publish_allocation_metrics = true
+  publish_node_metrics       = true
+}

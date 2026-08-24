@@ -1,0 +1,31 @@
+[Unit]
+Description=Hive browser farm — action API (cluster boundary)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node /opt/hive-browser-farm/src/bin/apid.ts
+WorkingDirectory=/opt/hive-browser-farm
+Restart=always
+RestartSec=5s
+
+Environment=PROFILE_ROOT=/var/lib/hive-profiles
+Environment=API_PORT=8088
+Environment=BROWSER_URL=http://127.0.0.1:9222
+# Writes stay off unless deliberately enabled. A sent message is not
+# recoverable and the blast radius of a caller bug is other people's inboxes.
+Environment=ALLOW_WRITES=0
+# API_TOKEN and PROXY_POOL come from the drop-in, not from this file:
+#   systemctl edit hive-api   →   [Service] Environment=API_TOKEN=…
+EnvironmentFile=-/etc/hive/api.env
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/hive-profiles
+ReadOnlyPaths=/etc/hive
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,113 @@
+# Hive browser-farm TLS terminator.
+#
+# Rendered by bootstrap.sh. Placeholders substituted at install time:
+#   __PRIMARY_HOSTNAME__  — e.g. "vm-west.open-hive.com" (Hillsboro),
+#                           "vm.open-hive.com" (Virginia)
+#   __API_HOSTNAME__      — e.g. "api.vm-west.open-hive.com"
+#   __WILDCARD_HOST__     — e.g. "*.vm-west.open-hive.com"
+#   __CERT_FULLCHAIN__    — path to fullchain.pem for the primary zone
+#   __CERT_PRIVKEY__      — path to privkey.pem for the primary zone
+#   __ACME_EMAIL__        — email in the `email` global directive
+#
+# Cert is a wildcard covering PRIMARY + WILDCARD; issued by certbot via
+# GoDaddy DNS-01 (creds at /etc/letsencrypt/godaddy.env, hooks in
+# /usr/local/bin/le-{auth,cleanup}.sh — restored from GCS by restore.sh).
+#
+# Route shape (identical to VA):
+#   __API_HOSTNAME__      → hive-ops-agent (/ops/*), hive-api (/farm/*, /console/*),
+#                            default 404 (E2B orchestrator NOT deployed on this box)
+#   __PRIMARY_HOSTNAME__ + __WILDCARD_HOST__
+#                          → client-proxy on :5006 (NOT deployed on this box —
+#                            the block is kept for future dual-region parity
+#                            when client-proxy comes back; today it 502s)
+
+{
+    email __ACME_EMAIL__
+    servers {
+        # Enable full-duplex HTTP/1.1 streaming. Required for reliable
+        # WebSocket upgrades through the reverse proxy — without it, the
+        # Go net/http server buffers the request body until the response
+        # is written, which breaks half-closed WS-style streams.
+        # (Caddy 2.11 does not yet expose RFC 8441 Extended CONNECT for
+        # HTTP/2 WebSockets directly; browsers fall back to HTTP/1.1
+        # upgrade for `new WebSocket()` so this knob is what's needed.)
+        enable_full_duplex
+    }
+}
+
+__API_HOSTNAME__ {
+    tls __CERT_FULLCHAIN__ __CERT_PRIVKEY__
+    encode gzip
+
+    # /ops/* → hive-ops-agent JSON observability daemon (read-only).
+    # Bearer-token gated using OPS_TOKEN from the systemd EnvironmentFile
+    # at /etc/default/hive-ops-caddy. The agent itself binds 127.0.0.1
+    # only so this Caddy block is the sole front door. CORS allow is
+    # required because the portal lives on a different origin.
+    handle /ops/* {
+        # CORS preflight first — browser never sends Authorization on
+        # the OPTIONS hop, so the auth gate would reject every preflight
+        # before any GET ever lands.
+        header Access-Control-Allow-Origin "*"
+        header Access-Control-Allow-Methods "GET, POST, OPTIONS"
+        header Access-Control-Allow-Headers "Authorization, Content-Type"
+        header Access-Control-Max-Age "600"
+
+        @ops_preflight method OPTIONS
+        respond @ops_preflight 204
+
+        # Bearer-token gate. v2.11 `respond` parses positional args as
+        # status code only; the body needs the block form.
+        @ops_noauth not header Authorization "Bearer {env.OPS_TOKEN}"
+        respond @ops_noauth 401 {
+            body "unauthorized"
+        }
+
+        uri strip_prefix /ops
+        reverse_proxy 127.0.0.1:5099 {
+            transport http {
+                keepalive 60s
+            }
+        }
+    }
+
+    # /console/* → the farm's noVNC proxy (127.0.0.1:8088), which fronts
+    # websockify for the repair/onboarding console. Token-gated inside the
+    # farm (ConsoleProxy.authorise), so this block only has to route — HTTP
+    # for the vnc.html client and Upgrade for the WebSocket the viewer
+    # dials. Must sit before /farm/* so the console path is not swallowed
+    # by the prefix strip.
+    @console path /console/*
+    handle @console {
+        reverse_proxy 127.0.0.1:8088
+    }
+
+    # /farm/* → hive-api, the browser farm's action API (127.0.0.1:8088).
+    # handle_path strips the /farm prefix, so hive-backend's
+    # ${FARM_BASE}/farm/v1/... reaches /v1/... here.
+    handle_path /farm/* {
+        reverse_proxy 127.0.0.1:8088 {
+            transport http {
+                keepalive 60s
+            }
+        }
+    }
+
+    # Default — no orchestrator on this box. Return 404 rather than
+    # proxying to a dead port and confusing callers.
+    respond 404 {
+        body "not found"
+    }
+}
+
+__PRIMARY_HOSTNAME__, __WILDCARD_HOST__ {
+    tls __CERT_FULLCHAIN__ __CERT_PRIVKEY__
+    encode gzip
+    # client-proxy is NOT deployed on this box today (browser-farm role,
+    # not sandbox-router role). Block kept for future dual-region parity.
+    # Requests currently 502 with an honest error rather than silently
+    # succeed against a stale routing table.
+    respond 502 {
+        body "client-proxy not deployed on this node"
+    }
+}

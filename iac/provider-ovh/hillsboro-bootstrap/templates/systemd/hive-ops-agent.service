@@ -1,0 +1,23 @@
+[Unit]
+Description=Hive ops observability agent (read-only system+sandbox state JSON on :5099)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+# Agent shells out to mc / psql / docker / curl for storage scan+sweep.
+# Without an explicit PATH systemd hands only /usr/bin:/bin to children,
+# which misses /usr/local/bin where mc lives.
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/etc/default/hive-ops-agent
+ExecStart=/usr/local/bin/hive-ops-agent
+Restart=always
+RestartSec=3
+# Intentionally privileged: storage sweeps mutate disk + docker registry.
+# NoNewPrivileges keeps it from escalating beyond what root already has.
+NoNewPrivileges=true
+PrivateTmp=false
+
+[Install]
+WantedBy=multi-user.target
