@@ -162,11 +162,20 @@ if [[ "$PHASE" == "all" || "$PHASE" == "state" ]]; then
   if [[ -f "${STAGE_DIR}/e2b.pgcustom" ]]; then
     log "  pg_restore e2b"
     run "sudo -u postgres createdb e2b 2>/dev/null || true"
-    run "sudo -u postgres pg_restore -d e2b --clean --if-exists '${STAGE_DIR}/e2b.pgcustom'"
-  fi
-  if [[ -f "${STAGE_DIR}/globals.sql" ]]; then
-    log "  psql globals.sql (roles/perms)"
-    run "sudo -u postgres psql -f '${STAGE_DIR}/globals.sql' 2>&1 | tail -20"
+    # Load globals.sql FIRST so any roles referenced by grants/policies exist.
+    # If a role (e.g. Supabase's `authenticated`, `trigger_user`) isn't defined
+    # in globals either, pg_restore skips the referring grants — expected in
+    # non-Supabase target — and the browser-farm workload doesn't need them.
+    if [[ -f "${STAGE_DIR}/globals.sql" ]]; then
+      log "  psql globals.sql (roles/perms) — before pg_restore so refs resolve"
+      run "sudo -u postgres psql < '${STAGE_DIR}/globals.sql' 2>&1 | tail -20 || true"
+    fi
+    # Same permission dance as archive.sh's pg_dump: stage dir is 0700 root,
+    # `sudo -u postgres pg_restore -f FILE` can't read it. Redirect stdin
+    # so the root parent process does the file open. `|| true` because
+    # pg_restore exits 1 on "errors ignored", which under set -e kills us
+    # even when the data landed fine.
+    run "sudo -u postgres pg_restore -d e2b --clean --if-exists < '${STAGE_DIR}/e2b.pgcustom' || true"
   fi
 
   # Redis RDB.
@@ -188,11 +197,16 @@ if [[ "$PHASE" == "all" || "$PHASE" == "state" ]]; then
     run "systemctl start redis-server"
   fi
 
-  # /opt/hive-browser-farm — bootstrap.sh already dropped the vendor copy;
-  # here we overlay the VA runtime state (deploy/*, spike/*, etc.) as a diff.
+  # /opt/hive-browser-farm — bootstrap.sh already dropped the vendor copy
+  # with its own uid/perms; the tarball has VA's uid/perms. We overlay VA's
+  # runtime state (deploy/*, spike/*, etc.) but keep newer files from
+  # bootstrap. `|| true` because tar 1.x returns non-zero on the
+  # "Unexpected inconsistency when making directory" warning that fires
+  # when the dir already exists with different metadata — that's expected
+  # here and harmless.
   if [[ -f "${STAGE_DIR}/opt-hive-browser-farm.tar.zst" ]]; then
     log "  overlay opt-hive-browser-farm.tar.zst on /opt (preserves node_modules from bootstrap)"
-    run "tar --zstd -xf '${STAGE_DIR}/opt-hive-browser-farm.tar.zst' -C /opt --keep-newer-files"
+    run "tar --zstd -xf '${STAGE_DIR}/opt-hive-browser-farm.tar.zst' -C /opt --keep-newer-files --no-same-owner 2>&1 | tail -5 || true"
   fi
 
   # /orchestrator — archaeology (not wired). Only unpack if the operator

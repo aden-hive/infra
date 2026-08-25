@@ -122,7 +122,10 @@ if [[ "$PHASE" == "all" || "$PHASE" == "snapshots" ]]; then
   # pg_dump uses MVCC — no lock, atomic across the DB.
   if command -v pg_dump >/dev/null 2>&1; then
     log "  pg_dump ${POSTGRES_DB}"
-    run "sudo -u postgres pg_dump -Fc -d '${POSTGRES_DB}' -f '${STAGE_DIR}/e2b.pgcustom'"
+    # Redirect stdout instead of `-f`: `sudo -u postgres` demotes the child,
+    # and postgres user has no write on /var/backups/migration (root:0700).
+    # The `>` binds in the parent shell (root), so file creation is fine.
+    run "sudo -u postgres pg_dump -Fc -d '${POSTGRES_DB}' > '${STAGE_DIR}/e2b.pgcustom'"
     log "  pg_dumpall -g (roles/perms)"
     run "sudo -u postgres pg_dumpall -g > '${STAGE_DIR}/globals.sql'"
   else
